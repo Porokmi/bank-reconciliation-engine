@@ -1,0 +1,3719 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Bank Rec Workbench</title>
+<link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700&family=Open+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script>
+/* Demo backend.
+   The production version of this tool used a hosted Postgres database (Supabase) with
+   sign-in and role-based access. For this public demo, that client is replaced by a small
+   in-browser stand-in with the same query interface, so saving, switching and rules still
+   work, but everything stays in this browser. All properties and accounts are fictional. */
+(function(){
+  const KEY='demo-bank-rec-db-v1';
+  const seed={
+    users:[{auth_user_id:'demo-user',full_name:'Demo Accountant',role:'accountant'}],
+    properties:[{code:'MPL',name:'Maple Court Co-op'},{code:'HBR',name:'Harbor View Condominium'}],
+    accounts:[
+      {id:'a1',property_code:'MPL',name:'Operating Account',num:'10010',type:'Cash',sort_order:1},
+      {id:'a2',property_code:'MPL',name:'Reserve Account',num:'10020',type:'Cash',sort_order:2},
+      {id:'a3',property_code:'HBR',name:'Operating Account',num:'10010',type:'Cash',sort_order:1}
+    ],
+    account_mapping:[
+      {property_code:'MPL',account_id:'a1',account_last4:'4821'},
+      {property_code:'MPL',account_id:'a2',account_last4:'7730'},
+      {property_code:'HBR',account_id:'a3',account_last4:'1905'}
+    ],
+    bank_reconciliation_rules:[],
+    bank_reconciliations:[]
+  };
+  const clone=v=>JSON.parse(JSON.stringify(v));
+  let db=null;
+  try{db=JSON.parse(localStorage.getItem(KEY));}catch(e){}
+  if(!db||typeof db!=='object')db=clone(seed);
+  const persist=()=>{try{localStorage.setItem(KEY,JSON.stringify(db));}catch(e){}};
+  class Query{
+    constructor(table){this.table=table;this.filters=[];this.op='select';this.payload=null;this.sort=null;this.one=null;}
+    select(){return this;}
+    insert(row){this.op='insert';this.payload=row;return this;}
+    update(row){this.op='update';this.payload=row;return this;}
+    delete(){this.op='delete';return this;}
+    eq(k,v){this.filters.push(r=>String(r[k])===String(v));return this;}
+    in(k,list){this.filters.push(r=>list.includes(r[k]));return this;}
+    is(k,v){this.filters.push(r=>(r[k]??null)===v);return this;}
+    or(expr){
+      const tests=expr.split(',').map(part=>{const [k,op,...rest]=part.split('.');const v=rest.join('.');
+        return r=>op==='is'?(r[k]??null)===null:String(r[k])===v;});
+      this.filters.push(r=>tests.some(t=>t(r)));return this;
+    }
+    order(k,opts={}){this.sort=[k,opts.ascending!==false];return this;}
+    single(){this.one='single';return this;}
+    maybeSingle(){this.one='maybe';return this;}
+    run(){
+      const rows=db[this.table]||(db[this.table]=[]);
+      const hit=r=>this.filters.every(f=>f(r));
+      let out;
+      if(this.op==='insert'){
+        const rec={id:'rec-'+Date.now().toString(36)+Math.random().toString(36).slice(2,6),...clone(this.payload)};
+        rows.push(rec);persist();out=[rec];
+      }else if(this.op==='update'){
+        out=rows.filter(hit);out.forEach(r=>Object.assign(r,clone(this.payload)));persist();
+      }else if(this.op==='delete'){
+        db[this.table]=rows.filter(r=>!hit(r));persist();out=[];
+      }else{
+        out=rows.filter(hit);
+      }
+      out=clone(out);
+      if(this.sort){const [k,asc]=this.sort;out.sort((a,b)=>(a[k]>b[k]?1:a[k]<b[k]?-1:0)*(asc?1:-1));}
+      if(this.one){
+        if(this.one==='single'&&out.length!==1)return {data:null,error:{message:'Record not found'}};
+        return {data:out[0]||null,error:null};
+      }
+      return {data:out,error:null};
+    }
+    then(resolve,reject){return Promise.resolve().then(()=>this.run()).then(resolve,reject);}
+  }
+  const client={
+    auth:{
+      getSession:async()=>({data:{session:{user:{id:'demo-user'}}}}),
+      getUser:async()=>({data:{user:{id:'demo-user'}}})
+    },
+    from:table=>new Query(table),
+    rpc:async name=>name==='visible_account_mapping_last4'?{data:clone(db.account_mapping),error:null}:{data:null,error:{message:'Unknown function'}}
+  };
+  window.supabase={createClient:()=>client};
+  window.resetDemoDatabase=()=>{db=clone(seed);persist();};
+})();
+</script>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
+:root{
+  --navy:#1B2A4A;
+  --navy-2:#111d34;
+  --slate:#243562;
+  --blue:#2E86C1;
+  --blue-2:#1B5EA8;
+  --blue-3:#3fa0dc;
+  --blue-soft:#EAF4FB;
+  --green:#1a8a4a;
+  --green-soft:#E8F7EE;
+  --amber:#B8860B;
+  --amber-soft:#FEF3E2;
+  --red:#C0392B;
+  --red-soft:#FDECEA;
+  --purple:#7B5EA8;
+  --purple-soft:#F0EBF8;
+  --gray:#465B78;
+  --gray-soft:#EDF1F6;
+  --border:#C9D5E4;
+  --bg:#F4F6F9;
+  --bg-2:#E8EBF0;
+  --surface:#ffffff;
+  --text:#1B2A4A;
+  --shadow:0 2px 12px rgba(27,42,74,.07);
+  --shadow-lg:0 8px 32px rgba(27,42,74,.13);
+}
+body{font-family:'Open Sans',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;font-size:14px;font-weight:500;overflow-x:hidden;--scratch-width:500px;}
+.app{display:grid;grid-template-columns:250px 1fr;min-height:100vh;}
+body.scratch-open .app{width:calc(100vw - var(--scratch-width));}
+body.sidebar-hidden .app{grid-template-columns:1fr;}
+body.sidebar-hidden .sidebar{display:none;}
+.sidebar{background:linear-gradient(180deg,#DCECF8 0%,#EAF4FB 260px,#F7FAFD 100%);border-right:3px solid var(--blue-2);padding:14px 14px 20px;display:flex;flex-direction:column;gap:14px;position:sticky;top:0;height:100vh;overflow-y:auto;scrollbar-width:thin;scrollbar-color:#76ADD2 transparent;}
+.sidebar-card{background:rgba(255,255,255,.78);border:1px solid #BFD4E5;border-radius:10px;padding:9px;display:flex;flex-direction:column;gap:8px;box-shadow:0 2px 8px rgba(27,42,74,.04);}
+.sidebar-title{font-family:'Montserrat',sans-serif;font-size:10px;font-weight:800;color:var(--navy);text-transform:uppercase;letter-spacing:.1em;padding:8px 9px;border:1px solid #AFCFE5;border-left:4px solid var(--blue-2);border-radius:6px;background:#DDEEF9;}
+.brand{padding:10px 10px 14px;border:1px solid #C9DFF0;border-radius:10px;background:rgba(255,255,255,.92);box-shadow:var(--shadow);}
+.brand-logo{display:block;width:168px;max-width:100%;height:auto;margin:0 0 10px;object-fit:contain;object-position:left center;}
+.brand h1{font-family:'Montserrat',sans-serif;font-size:15px;font-weight:700;color:var(--navy);padding-top:9px;border-top:1px solid var(--border);}
+.brand p{font-size:11px;font-weight:600;color:#3F5470;margin-top:4px;line-height:1.5;}
+.upload-zone{border:1.5px dashed #8CB8D8;border-radius:10px;padding:10px 12px;text-align:center;cursor:pointer;background:#F8FCFF;transition:.15s;box-shadow:none;}
+.upload-zone:hover,.upload-zone.drag{border-color:var(--blue);background:#F7FBFF;box-shadow:none;}
+.upload-zone input{display:none;}
+.upload-zone.loaded{border-style:solid;border-color:#BDE1CD;background:#F5FBF7;padding:8px 10px;text-align:left;display:grid;grid-template-columns:minmax(0,1fr) auto;column-gap:8px;align-items:center;box-shadow:none;}
+.upload-zone.loaded:hover{border-color:#68b486;background:#f1faf5;}
+.upload-zone.loaded .upload-head{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.upload-zone.loaded .upload-sub{display:none;}
+.upload-zone.loaded .upload-status{margin:0;padding:4px 7px;max-width:126px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:right;}
+.upload-zone.loaded .mapping-preview{display:none;}
+.upload-head{font-family:'Montserrat',sans-serif;font-size:11px;font-weight:700;color:var(--navy);}
+.upload-sub{font-size:10px;font-weight:600;color:#526984;margin-top:2px;}
+.upload-status{display:none;margin-top:8px;padding:6px 8px;border-radius:8px;font-size:10px;font-weight:700;}
+.upload-status.ok{display:block;background:#e8f7ee;color:var(--green);}
+.upload-status.err{display:block;background:var(--red-soft);color:var(--red);}
+.mapping-preview{display:none;margin-top:8px;padding:8px;border:1px solid #c8d8ea;border-radius:10px;background:#f8fbff;text-align:left;}
+.mapping-preview.show{display:block;}
+.mapping-preview .map-row{display:flex;justify-content:space-between;gap:8px;font-size:10px;padding:2px 0;}
+.mapping-preview .map-key{color:var(--gray);font-weight:700;text-transform:uppercase;letter-spacing:.04em;}
+.mapping-preview .map-val{color:var(--navy);font-family:'JetBrains Mono',monospace;text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:120px;}
+.button-row{display:grid;grid-template-columns:1fr 1fr;gap:8px;}
+.button-row.saved-row{grid-template-columns:minmax(0,1fr) 84px;align-items:center;}
+.action-stack{display:grid;gap:11px;}
+.action-group{display:grid;gap:7px;padding-bottom:11px;border-bottom:1px solid #C8D7E5;}
+.action-group:last-child{padding-bottom:0;border-bottom:0;}
+.action-label{font-family:'Montserrat',sans-serif;font-size:9px;font-weight:800;color:#4B6380;text-transform:uppercase;letter-spacing:.09em;display:flex;align-items:center;gap:6px;}
+.action-number{display:inline-grid;place-items:center;width:18px;height:18px;border-radius:50%;background:#D9EAF6;color:#174F82;font-size:9px;}
+.action-wide{width:100%;min-height:38px;}
+.action-tools{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;}
+.action-tools .btn{padding:8px 4px;font-size:10px;}
+.action-save-state{display:flex;align-items:flex-start;gap:7px;padding:8px 9px;border:1px solid #BFD4E5;border-radius:8px;background:#F5FAFE;color:#405674;font-size:9px;font-weight:600;line-height:1.4;}
+.action-save-state::before{content:'';width:8px;height:8px;border-radius:50%;background:#D19720;margin-top:2px;flex:0 0 auto;}
+.action-save-state.saved{border-color:#A9D7C0;background:#EEF8F3;color:#176B45;}
+.action-save-state.saved::before{background:#1A8A4A;}
+.saved-switch{display:grid;grid-template-columns:minmax(0,1fr) 64px;gap:6px;}
+.saved-switch .select{width:100%;height:38px;min-width:0;font-size:10px;font-weight:700;}
+.btn-danger-soft{background:#FFF5F4;color:#A53A30;border:1px solid #E8B8B2;}
+.btn-danger-soft:hover{background:#FDECEA;border-color:#D9877D;color:#8D2F27;}
+.action-finish{display:grid;grid-template-columns:1fr 1fr;gap:6px;}
+.btn{border:none;border-radius:8px;padding:9px 12px;font-family:'Open Sans',sans-serif;font-size:11px;font-weight:700;cursor:pointer;transition:all .15s;}
+.btn-primary{background:#243966;color:#fff;border:1px solid #243966;box-shadow:0 8px 18px rgba(36,57,102,.18);}
+.btn-primary:hover{background:#2d467b;border-color:#2d467b;}
+.btn-muted{background:#ffffff;color:var(--navy);border:1px solid #D3DEEF;box-shadow:0 2px 6px rgba(27,42,74,.04);}
+.btn-muted:hover{background:#F6FBFF;border-color:var(--blue);color:var(--blue);}
+.btn-complete{width:100%;background:#EAF7F0;color:#176B45;border:1px solid #9FD8BA;box-shadow:0 2px 6px rgba(23,107,69,.06);}
+.btn-complete:hover{background:#DDF2E7;border-color:#58B184;color:#125637;}
+.btn:disabled{background:var(--border);color:var(--gray);cursor:not-allowed;}
+.filter-list{display:flex;flex-direction:column;gap:5px;}
+.filter-btn{padding:8px 10px;border:1.5px solid var(--border);border-radius:8px;background:#fff;text-align:left;font-size:11px;font-weight:700;color:#354B68;display:flex;justify-content:space-between;align-items:center;cursor:pointer;}
+.filter-btn.active{background:var(--blue);border-color:var(--blue);color:#fff;}
+.filter-badge{font-size:9px;padding:2px 6px;border-radius:999px;background:rgba(0,0,0,.08);}
+.filter-btn.active .filter-badge{background:rgba(255,255,255,.24);}
+.stat-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px;}
+.stat{background:#ffffff;border:1px solid #d6e1ee;border-radius:12px;padding:9px 6px;text-align:center;}
+.stat .num{font-family:'Montserrat',sans-serif;font-size:18px;font-weight:800;color:var(--navy);}
+.stat .lbl{font-size:9px;font-weight:700;color:#526984;text-transform:uppercase;letter-spacing:.05em;margin-top:2px;}
+.stat.green .num{color:var(--green);}
+.stat.amber .num{color:var(--amber);}
+.stat.red .num{color:var(--red);}
+.stat.purple .num{color:var(--purple);}
+.workspace{display:flex;flex-direction:column;min-width:0;background:var(--bg);}
+.topbar{background:linear-gradient(90deg,#EAF4FB 0%,#F6FBFF 42%,#FFFFFF 76%);border-top:4px solid var(--blue);border-bottom:1px solid #C9DFF0;padding:10px 20px 12px;display:flex;gap:12px;align-items:center;box-shadow:0 2px 12px rgba(27,42,74,.07);position:sticky;top:0;z-index:20;min-height:68px;}
+.page-title{flex:1;}
+.page-title h2{font-family:'Montserrat',sans-serif;font-size:17px;font-weight:700;color:var(--navy);padding-left:11px;border-left:4px solid var(--blue);}
+.page-title p{font-size:11px;color:var(--gray);margin-top:3px;}
+.toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;}
+.search,.select{border:1.5px solid var(--border);border-radius:8px;background:#fff;padding:8px 10px;font-size:12px;font-family:'Open Sans',sans-serif;color:var(--text);outline:none;}
+.search:focus,.select:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(46,134,193,.12);}
+.search{width:220px;}
+.body{padding:20px;display:flex;flex-direction:column;gap:16px;overflow:auto;}
+.meta-strip{display:grid;grid-template-columns:1fr auto auto;gap:12px;align-items:start;}
+.meta-card,.mini-box,.summary-panel,.action-section,.split-shell{box-shadow:var(--shadow);}
+.meta-card{background:#ffffff;border:1px solid var(--border);border-radius:12px;padding:14px 16px;}
+.meta-card h3{font-family:'Montserrat',sans-serif;font-size:12px;font-weight:800;color:var(--navy);text-transform:uppercase;letter-spacing:.06em;}
+.meta-card p{font-size:11px;color:var(--gray);margin-top:4px;line-height:1.5;}
+.mini-meta{display:grid;grid-template-columns:repeat(2,minmax(150px,1fr));gap:10px;}
+.mini-box{background:#ffffff;border:1px solid var(--border);border-radius:10px;padding:12px 14px;}
+.mini-box .k{font-size:10px;color:var(--gray);text-transform:uppercase;letter-spacing:.06em;font-weight:700;}
+.mini-box .v{font-family:'Montserrat',sans-serif;font-size:18px;font-weight:800;color:var(--navy);margin-top:4px;}
+.summary-grid{display:grid;grid-template-columns:1fr;gap:14px;}
+.statement-control{background:#fff;border:1px solid var(--border);border-radius:12px;overflow:hidden;box-shadow:var(--shadow);}
+.statement-control-head{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:9px 14px;background:#E4F1FA;border-bottom:1px solid #BFD4E5;}
+.statement-control-head h3{font-family:'Montserrat',sans-serif;font-size:11px;font-weight:800;color:var(--navy);text-transform:uppercase;letter-spacing:.05em;}
+.statement-control-head span{font-size:10px;font-weight:600;color:#465B78;}
+.statement-metrics{display:grid;grid-template-columns:repeat(6,minmax(110px,1fr));}
+.statement-metric{padding:10px 12px;border-right:1px solid var(--border);min-width:0;}
+.statement-metric:last-child{border-right:0;}
+.statement-metric .k{font-size:9px;font-weight:800;color:#526984;text-transform:uppercase;letter-spacing:.05em;white-space:nowrap;}
+.statement-metric .v{font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:700;color:var(--navy);margin-top:4px;white-space:nowrap;}
+.statement-metric.result{background:#F5FAFE;}
+.statement-metric.difference.ok{background:var(--green-soft);}
+.statement-metric.difference.ok .v{color:var(--green);}
+.statement-metric.difference.open{background:var(--red-soft);}
+.statement-metric.difference.open .v{color:var(--red);}
+.summary-panel{background:#ffffff;border:1px solid var(--border);border-radius:12px;padding:14px 16px;position:relative;overflow:hidden;}
+.summary-panel::before{display:none;}
+.summary-panel::after{content:'';position:absolute;left:0;right:0;top:0;height:56px;background:#243966;opacity:1;}
+.summary-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;}
+.summary-header h3{font-family:'Montserrat',sans-serif;font-size:13px;font-weight:800;color:#fff;position:relative;z-index:1;}
+.summary-sub{font-size:10px;color:rgba(255,255,255,.82);position:relative;z-index:1;}
+.summary-table{width:100%;border-collapse:collapse;background:#ffffff;border:1px solid var(--border);border-radius:10px;overflow:hidden;}
+.summary-table td{padding:6px 0;border-bottom:1px solid var(--gray-soft);font-size:12px;}
+.summary-table tr:first-child td{padding-top:10px;}
+.summary-table td:first-child{padding-left:12px;font-weight:600;color:#24344a;}
+.summary-table td:last-child{padding-right:12px;}
+.summary-table td:last-child{text-align:right;font-family:'JetBrains Mono',monospace;}
+.summary-table tr:last-child td{border-bottom:none;font-weight:800;color:var(--navy);padding-top:9px;}
+.summary-split{display:grid;grid-template-columns:1fr 1fr;gap:18px;}
+.summary-col h4{font-family:'Montserrat',sans-serif;font-size:11px;font-weight:800;color:var(--blue-2);text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px;margin-top:18px;}
+.queue-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(165px,1fr));gap:12px;}
+.queue-card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px 16px;cursor:pointer;box-shadow:var(--shadow);}
+.queue-card h4{font-family:'Montserrat',sans-serif;font-size:11px;font-weight:800;color:var(--gray);text-transform:uppercase;letter-spacing:.06em;}
+.queue-card .big{font-family:'Montserrat',sans-serif;font-size:24px;font-weight:800;color:var(--navy);margin-top:8px;}
+.queue-card .amt{font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--gray);margin-top:4px;}
+.queue-card.journal{border-color:#f0c0ba;background:#fff9f7;}
+.queue-card.upload{border-color:#bfd8ee;background:#f7fbff;}
+.queue-card.review{border-color:#cfd9eb;background:#fbfcfe;}
+.queue-card.timing{border-color:#dde3ed;background:#fcfdff;}
+.queue-card.reviewed{border-color:#bfd3f8;background:#f5f9ff;}
+.queue-card.journaled{border-color:#d2c8fa;background:#faf8ff;}
+.queue-card.upload .big{color:var(--blue-2);}
+.action-section{background:#ffffff;border:1px solid var(--border);border-radius:12px;overflow:hidden;}
+.action-head{padding:12px 14px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;background:#243966;}
+.action-head h3{font-family:'Montserrat',sans-serif;font-size:12px;font-weight:800;color:var(--navy);}
+.action-head h3,.action-head .summary-sub{color:#f3f8fd;}
+.action-body{padding:0;}
+.group-block{border-top:1px solid var(--gray-soft);}
+.group-title{padding:10px 14px;background:#edf3f9;font-family:'Montserrat',sans-serif;font-size:10px;font-weight:800;color:#4a5d75;text-transform:uppercase;letter-spacing:.07em;border-top:1px solid #d4e0ec;border-bottom:1px solid #dbe5ef;display:flex;align-items:center;justify-content:space-between;cursor:pointer;}
+.group-title:hover{background:#e5eef7;}
+.group-label{display:flex;align-items:center;gap:10px;}
+.group-caret{font-size:12px;color:#59728f;min-width:12px;}
+.group-meta{font-weight:600;color:var(--gray);}
+.group-content{display:block;}
+.group-block.collapsed .group-content{display:none;}
+.subsection-head{padding:10px 14px;background:#243966;border-top:1px solid #182744;border-bottom:1px solid #182744;font-family:'Montserrat',sans-serif;font-size:10px;font-weight:800;color:#eef4ff;text-transform:uppercase;letter-spacing:.07em;}
+.subsection-note{font-size:10px;color:rgba(255,255,255,.78);margin-left:8px;font-weight:600;text-transform:none;letter-spacing:0;}
+.mini-table-header,.mini-row{display:grid;grid-template-columns:88px 110px 1fr 110px 100px;gap:10px;padding:8px 14px;align-items:center;}
+.mini-table-header{background:#243966;border-top:1px solid #182744;border-bottom:1px solid #182744;font-size:9px;font-weight:800;color:#eef4ff;text-transform:uppercase;letter-spacing:.06em;}
+.mini-row{border-bottom:1px solid var(--gray-soft);}
+.mini-row:hover{background:#f4f8fd;}
+.vendor-chip{display:inline-flex;align-items:center;padding:3px 8px;border-radius:999px;font-size:9px;font-weight:800;background:var(--gray-soft);color:var(--gray);}
+.vendor-chip.bank{background:var(--blue-soft);color:var(--blue);}
+.vendor-chip.book{background:#eef2f7;color:#53627a;}
+.vendor-chip.cd{background:#e8f2ff;color:#1f5f9f}.vendor-chip.gj{background:#eeeaff;color:#5b4fa8}.vendor-chip.cr{background:#e7f7ef;color:#17735f}
+.resolution-control{display:grid;gap:4px;margin-top:5px}.resolution-control label{font-size:8px;font-weight:800;color:#667085;text-transform:uppercase;letter-spacing:.04em}.resolution-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px;width:100%}.resolution-btn{min-width:0;height:27px;padding:3px 5px;border:1px solid #b9c9da;border-radius:5px;background:#fff;color:#24344a;font:800 8px 'Open Sans',sans-serif;cursor:pointer;white-space:nowrap}.resolution-btn:hover{border-color:var(--blue);background:#f4f9fd}.resolution-btn.active{color:#fff;border-color:transparent;box-shadow:0 1px 3px rgba(20,43,75,.16)}.resolution-btn.cd.active{background:#246fa8}.resolution-btn.gj.active{background:#6550a8}.resolution-btn.cr.active{background:#16806d}.resolution-btn:focus-visible{outline:2px solid rgba(45,143,204,.24);outline-offset:1px}
+.status-cell{display:flex;flex-direction:column;gap:4px;align-items:flex-start;}
+.tone-utility{box-shadow:inset 4px 0 0 #7aa5d2;}
+.tone-payroll{box-shadow:inset 4px 0 0 #d69a6c;}
+.tone-insurance{box-shadow:inset 4px 0 0 #78b58d;}
+.tone-32bj{box-shadow:inset 4px 0 0 #9d86c8;}
+.tone-fee{box-shadow:inset 4px 0 0 #d0a24f;}
+.tone-transfer{box-shadow:inset 4px 0 0 #9098a8;}
+.tone-default{box-shadow:inset 4px 0 0 #d4dae5;}
+.tabs{display:flex;gap:8px;}
+.tab{border:1.5px solid var(--border);background:#ffffff;border-radius:999px;padding:8px 14px;font-family:'Open Sans',sans-serif;font-size:11px;font-weight:700;color:var(--gray);cursor:pointer;box-shadow:var(--shadow);}
+.tab.active{background:var(--navy);border-color:var(--navy);color:#fff;box-shadow:0 8px 20px rgba(27,42,74,.18);}
+.split-shell{background:#ffffff;border:1px solid var(--border);border-radius:12px;overflow:hidden;}
+.split-toolbar{display:flex;justify-content:space-between;gap:10px;align-items:center;padding:12px 14px;border-bottom:1px solid var(--border);background:#243966;}
+.split-toolbar h3{font-family:'Montserrat',sans-serif;font-size:12px;font-weight:800;color:var(--navy);}
+.split-toolbar h3{color:#f3f8fd;}
+.legend{display:flex;gap:8px;flex-wrap:wrap;}
+.pill{display:inline-flex;align-items:center;gap:5px;padding:5px 8px;border-radius:999px;font-size:10px;font-weight:700;cursor:pointer;border:1px solid transparent;transition:.12s;}
+.pill.green{background:var(--green-soft);color:var(--green);}
+.pill.amber{background:var(--amber-soft);color:var(--amber);}
+.pill.red{background:var(--red-soft);color:var(--red);}
+.pill.purple{background:var(--purple-soft);color:var(--purple);}
+.pill.gray{background:var(--gray-soft);color:var(--gray);}
+.pill.indigo{background:#ece8ff;color:#5b4fa8;}
+.pill.active{border-color:var(--navy);box-shadow:0 0 0 1px rgba(35,42,51,.1);}
+.pill:hover{transform:translateY(-1px);}
+.split-grid{display:grid;grid-template-columns:1fr 1fr;min-height:540px;}
+.pane{display:flex;flex-direction:column;min-width:0;}
+.pane + .pane{border-left:1px solid var(--border);}
+.pane-head{padding:12px 14px;border-bottom:1px solid #c2d3e4;background:#f4f8fc;}
+.pane-head h4{font-family:'Montserrat',sans-serif;font-size:12px;font-weight:800;color:var(--navy);}
+.pane-head p{font-size:10px;color:var(--gray);margin-top:2px;}
+.pane-body{overflow:auto;max-height:640px;}
+.row-header{display:grid;grid-template-columns:74px 82px 1fr 110px 86px;gap:10px;padding:8px 14px;border-bottom:1px solid var(--border);background:#fbfcfe;font-size:9px;font-weight:800;color:var(--gray);text-transform:uppercase;letter-spacing:.05em;position:sticky;top:0;z-index:2;}
+.row-header.book{grid-template-columns:74px 88px 1fr 110px 92px;}
+.row-header{border-bottom:1px solid #182744;background:#243966;font-size:9px;font-weight:800;color:#eef4ff;text-transform:uppercase;letter-spacing:.06em;position:sticky;top:0;z-index:2;}
+.row{display:grid;grid-template-columns:74px 82px 1fr 110px 86px;gap:10px;padding:10px 14px;border-bottom:1px solid var(--gray-soft);align-items:center;}
+.row.book{grid-template-columns:74px 88px 1fr 110px 92px;}
+.row:hover{background:#f1f7fd;}
+.row .mono{font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--gray);}
+.row .desc{min-width:0;}
+.row .desc strong{display:block;font-size:12px;color:var(--text);}
+.row .desc span{display:block;font-size:10px;color:var(--gray);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.amt{font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:600;text-align:right;}
+.amt.neg{color:var(--red);}
+.amt.pos{color:var(--green);}
+.tag{display:inline-flex;align-items:center;justify-content:center;padding:4px 7px;border-radius:999px;font-size:9px;font-weight:800;text-transform:uppercase;letter-spacing:.05em;}
+.tag.matched{background:var(--green-soft);color:var(--green);}
+.tag.review{background:var(--amber-soft);color:var(--amber);}
+.tag.journal{background:var(--red-soft);color:var(--red);}
+.tag.income{background:var(--purple-soft);color:var(--purple);}
+.tag.outstanding{background:var(--gray-soft);color:var(--gray);}
+.tag.reviewed{background:#e6f0ff;color:#245fa8;}
+.tag.journaled{background:#ece8ff;color:#5b4fa8;}
+.conf{display:inline-flex;align-items:center;padding:3px 6px;border-radius:8px;font-size:9px;font-weight:800;background:var(--blue-pale);color:var(--blue-2);margin-top:4px;}
+.empty{padding:30px 20px;text-align:center;color:var(--gray);}
+.journal-panel{display:none;position:fixed;top:0;right:0;width:720px;height:100vh;background:var(--surface);box-shadow:-4px 0 30px rgba(0,0,0,.15);z-index:100;flex-direction:column;}
+.journal-panel.open{display:flex;}
+.journal-header{background:var(--navy);padding:18px 24px;display:flex;align-items:center;justify-content:space-between;}
+.journal-header-title{font-family:'Montserrat',sans-serif;font-size:15px;font-weight:700;color:#fff;}
+.journal-close{background:none;border:none;color:rgba(255,255,255,.65);font-size:20px;cursor:pointer;padding:4px;}
+.journal-body{flex:1;overflow-y:auto;padding:20px 24px;}
+.journal-table{width:100%;border-collapse:collapse;font-family:'JetBrains Mono',monospace;font-size:12px;}
+.journal-table th{padding:8px 10px;background:var(--bg);border-bottom:2px solid var(--border);text-align:left;font-family:'Montserrat',sans-serif;font-size:9px;font-weight:700;color:var(--gray);text-transform:uppercase;}
+.journal-table td{padding:7px 10px;border-bottom:1px solid var(--border);}
+.journal-table .group-row{background:var(--navy);color:#fff;}
+.journal-table .group-row td{font-family:'Montserrat',sans-serif;font-size:10px;font-weight:700;padding:5px 10px;}
+.journal-group-line{display:flex;align-items:center;justify-content:space-between;gap:12px}.journal-state{display:inline-flex;align-items:center;padding:3px 7px;border-radius:999px;font-size:8px;font-weight:800;letter-spacing:.03em;text-transform:uppercase}.journal-state.recorded{background:#dff4ea;color:#126b51}.journal-state.partial{background:#fff0c9;color:#7f5700}.journal-state.pending{background:#fce4e1;color:#9a352b}
+.journal-edit{width:100%;min-width:72px;height:28px;padding:4px 6px;border:1px solid #b8c9db;border-radius:5px;background:#fff;color:#172b49;font:600 10px 'JetBrains Mono',monospace}.journal-edit.desc{min-width:150px;font-family:'Open Sans',sans-serif}.journal-edit.missing{border-color:#df7c71;background:#fff7f6}.journal-edit:focus{outline:2px solid rgba(45,143,204,.2);border-color:var(--blue)}
+.journal-footer{padding:16px 24px;border-top:1px solid var(--border);display:flex;gap:8px;}
+.scratch-panel{display:none;position:fixed;right:0;top:0;width:var(--scratch-width);height:100vh;background:var(--surface);border-left:2px solid #7EAED0;box-shadow:-8px 0 30px rgba(17,29,52,.18);z-index:110;flex-direction:column;overflow:hidden;}
+.scratch-panel.open{display:flex;}
+.scratch-resizer{position:absolute;left:-5px;top:0;width:10px;height:100%;cursor:col-resize;z-index:4;touch-action:none;}
+.scratch-header{background:#243966;padding:14px 18px;display:flex;align-items:center;justify-content:space-between;gap:16px;color:#fff;}
+.scratch-header h2{font-family:'Montserrat',sans-serif;font-size:15px;font-weight:800;}
+.scratch-header p{font-size:10px;font-weight:600;color:rgba(255,255,255,.78);margin-top:3px;}
+.scratch-head-actions{display:flex;align-items:center;gap:8px;}
+.scratch-head-actions .btn{padding:7px 11px;}
+.scratch-grid-wrap{flex:1;overflow:auto;background:#E9EFF5;padding:12px;}
+.scratch-table{border-collapse:collapse;table-layout:fixed;min-width:920px;width:100%;background:#fff;box-shadow:0 2px 10px rgba(27,42,74,.08);}
+.scratch-table th{height:30px;border:1px solid #B9C8D8;background:#DCE8F2;color:#203653;font-family:'Montserrat',sans-serif;font-size:10px;font-weight:800;text-align:center;position:sticky;top:0;z-index:2;}
+.scratch-table th.corner{width:42px;left:0;z-index:3;}
+.scratch-table th.row-head{width:42px;position:sticky;left:0;z-index:1;background:#E8F0F6;}
+.scratch-table td{border:1px solid #C7D3DF;height:31px;background:#fff;}
+.scratch-cell{display:block;width:100%;height:30px;border:0;border-radius:0;background:transparent;padding:5px 7px;color:#172A46;font:600 11px 'Open Sans',sans-serif;outline:none;}
+.scratch-cell:focus{box-shadow:inset 0 0 0 2px var(--blue);background:#F5FBFF;}
+.scratch-cell.formula{font-family:'JetBrains Mono',monospace;color:#1B5EA8;text-align:right;}
+.scratch-cell.number{font-family:'JetBrains Mono',monospace;text-align:right;}
+.scratch-cell.error{color:var(--red);background:var(--red-soft);}
+.scratch-footer{padding:10px 14px;border-top:1px solid var(--border);background:#F8FBFE;display:flex;align-items:center;justify-content:space-between;gap:12px;color:#405674;font-size:10px;font-weight:600;}
+.toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%) translateY(20px);background:var(--navy);color:#fff;padding:10px 20px;border-radius:10px;font-size:13px;font-weight:600;opacity:0;transition:all .3s;pointer-events:none;z-index:999;}
+.toast.show{opacity:1;transform:translateX(-50%) translateY(0);}
+.cloud-fields{display:grid;gap:8px}.cloud-fields label{display:grid;gap:4px;font-size:10px;font-weight:800;color:#354B68;text-transform:uppercase;letter-spacing:.05em}.cloud-fields input,.cloud-fields select{width:100%;border:1.5px solid #B8C9DB;border-radius:8px;background:#fff;padding:8px 9px;font:600 12px 'Open Sans',sans-serif;color:var(--navy);outline:none}.cloud-fields input:focus,.cloud-fields select:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(46,134,193,.12)}.cloud-account-grid{display:grid;grid-template-columns:minmax(0,1fr) 78px;gap:7px}.cloud-balance-grid{display:grid;grid-template-columns:1fr 1fr;gap:7px;padding-top:2px}.cloud-balance-grid input{font-family:'JetBrains Mono',monospace;font-size:11px}.cloud-state{padding:8px 9px;border:1px solid var(--border);border-radius:8px;background:#F8FBFF;color:#405674;font-size:10px;font-weight:600;line-height:1.45}.cloud-state.ready{border-color:#98CFB8;background:#E6F5EF;color:#126047}.cloud-state.error{border-color:#F2C7C1;background:#FDECEA;color:#A14235}.cloud-badge{display:inline-flex;align-items:center;gap:5px;padding:5px 9px;border-radius:999px;background:var(--blue-pale);border:1px solid #D5E6F7;color:var(--blue);font-size:9px;font-weight:700;letter-spacing:.04em}.dashboard-link{display:inline-flex;align-items:center;text-decoration:none;border:1.5px solid #D3DEEF;border-radius:8px;padding:7px 11px;background:#fff;color:var(--navy);font-family:'Open Sans',sans-serif;font-size:10px;font-weight:700;box-shadow:0 2px 6px rgba(27,42,74,.04)}.dashboard-link:hover{background:#F6FBFF;border-color:var(--blue);color:var(--blue)}
+.top-action{border:1.5px solid #D3DEEF;border-radius:8px;padding:7px 11px;font-family:'Open Sans',sans-serif;font-size:10px;font-weight:700;cursor:pointer;color:var(--navy);background:#fff;box-shadow:0 2px 6px rgba(27,42,74,.04)}
+.top-action:hover{background:#F6FBFF;border-color:var(--blue);color:var(--blue)}.top-action.primary{background:#243966;border-color:#243966;color:#fff;box-shadow:0 8px 18px rgba(36,57,102,.18)}.top-action.primary:hover{background:#2D467B;border-color:#2D467B;color:#fff}.top-action:disabled{opacity:.48;cursor:not-allowed;box-shadow:none}.source-badge.complete{background:#E8F7EE;border-color:#BDE1CD;color:#1a8a4a}
+.welcome-shell{display:grid;gap:16px}.welcome-hero{display:flex;align-items:center;justify-content:space-between;gap:24px;padding:20px 22px;border:1px solid var(--border);border-radius:12px;background:#fff;box-shadow:var(--shadow)}.welcome-eyebrow{font-family:'Montserrat',sans-serif;font-size:10px;font-weight:700;color:var(--blue);letter-spacing:.09em;text-transform:uppercase}.welcome-hero h3{font-family:'Montserrat',sans-serif;font-size:20px;font-weight:700;color:var(--navy);margin-top:6px}.welcome-hero p{max-width:660px;color:var(--gray);font-size:12px;line-height:1.6;margin-top:7px}.welcome-status{min-width:190px;padding:13px 15px;border:1px solid var(--border);border-radius:10px;background:#F8FBFF}.welcome-status strong{display:block;font-family:'Montserrat',sans-serif;font-size:12px;color:var(--navy)}.welcome-status span{display:block;font-size:10px;color:var(--gray);line-height:1.45;margin-top:4px}.workflow-steps{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.workflow-step{position:relative;min-height:105px;padding:15px 15px 14px 48px;border:1px solid var(--border);border-radius:10px;background:#fff;box-shadow:var(--shadow)}.workflow-step .step-no{position:absolute;left:14px;top:14px;width:24px;height:24px;display:grid;place-items:center;border-radius:50%;background:#E6EEF8;color:#1B5EA8;font-family:'Montserrat',sans-serif;font-size:10px;font-weight:700}.workflow-step strong{display:block;font-family:'Montserrat',sans-serif;font-size:11px;color:var(--navy)}.workflow-step p{font-size:10px;color:var(--gray);line-height:1.45;margin-top:5px}.workflow-step.ready{border-color:#BDE1CD;background:#F6FCF8}.workflow-step.ready .step-no{background:var(--green);color:#fff}.workflow-step.active{border-color:#9FC7E3;background:#F7FBFF;box-shadow:inset 0 3px 0 var(--blue)}.workflow-step.active .step-no{background:var(--blue);color:#fff}.source-panel{border:1px solid var(--border);border-radius:12px;background:#fff;overflow:hidden;box-shadow:var(--shadow)}.source-panel-head{display:flex;justify-content:space-between;gap:16px;align-items:center;padding:14px 16px;background:#F4F6F9;border-bottom:1px solid var(--border)}.source-panel-head h4{font-family:'Montserrat',sans-serif;font-size:12px;color:var(--navy)}.source-panel-head span{font-size:10px;color:var(--gray)}.source-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr))}.source-item{min-height:105px;padding:14px;border-right:1px solid var(--border)}.source-item:last-child{border-right:none}.source-label{font-family:'Montserrat',sans-serif;font-size:10px;font-weight:700;color:var(--navy)}.source-role{font-size:9px;color:var(--gray);line-height:1.4;margin-top:5px;min-height:25px}.source-state{display:inline-flex;margin-top:10px;padding:4px 7px;border-radius:999px;background:#EEF1F5;color:#667085;font-size:9px;font-weight:700}.source-item.loaded{background:#F8FCF9}.source-item.loaded .source-state{background:#E6F5EF;color:#17735F}.welcome-note{display:flex;align-items:flex-start;gap:10px;padding:12px 14px;border-left:4px solid var(--blue);border-radius:8px;background:#F8FBFF;color:#4A607F;font-size:10px;line-height:1.5}
+@media (max-width:1200px){
+  .app{grid-template-columns:1fr;}
+  .sidebar{border-right:none;border-bottom:1px solid var(--border);position:static;height:auto;overflow:visible;}
+  .summary-grid,.split-grid,.meta-strip,.summary-split,.queue-grid{grid-template-columns:1fr;}
+  .workflow-steps{grid-template-columns:repeat(2,minmax(0,1fr))}.source-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.source-item{border-bottom:1px solid #e0e7ef}.welcome-hero{align-items:flex-start;flex-direction:column}.welcome-status{width:100%}
+  .statement-metrics{grid-template-columns:repeat(3,minmax(110px,1fr))}.statement-metric:nth-child(3){border-right:0}.statement-metric:nth-child(-n+3){border-bottom:1px solid var(--border)}
+  .pane + .pane{border-left:none;border-top:1px solid var(--border);}
+}
+@media (max-width:700px){
+  body.scratch-open .app{display:none}.scratch-panel{width:100vw}
+  .statement-control-head{align-items:flex-start;flex-direction:column}.statement-metrics{grid-template-columns:repeat(2,minmax(110px,1fr))}.statement-metric:nth-child(3){border-right:1px solid var(--border)}.statement-metric:nth-child(2n){border-right:0}.statement-metric:nth-child(-n+4){border-bottom:1px solid var(--border)}
+}
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="sidebar-card brand">
+      <h1>Bank Rec Workbench</h1>
+      <p>Matches a bank export against the books (journal, disbursements, receipts) and flags what needs review. <strong>Demo with fictional data.</strong></p>
+      <button class="btn btn-primary action-wide" style="margin-top:10px" onclick="loadSampleData()">Load sample data</button>
+    </div>
+
+    <div class="sidebar-card">
+      <div class="sidebar-title">Workspace (saved in this browser)</div>
+      <div class="cloud-fields">
+        <label>Property<select id="cloud-property" onchange="bankRecCloudContextChanged()"><option value="">Choose property...</option></select></label>
+        <label>Reporting month<input id="cloud-month" type="month" onchange="bankRecCloudContextChanged()"></label>
+        <div class="cloud-account-grid">
+          <label>Bank account<select id="cloud-account-label" onchange="bankRecAccountChanged()"><option value="">Choose account...</option></select></label>
+          <label>Last 4<input id="cloud-account-last4" type="text" inputmode="numeric" maxlength="4" placeholder="Auto" oninput="this.value=this.value.replace(/\D/g,'').slice(0,4);bankRecCloudDetailsChanged()"></label>
+        </div>
+        <div class="cloud-balance-grid">
+          <label>BOM balance<input id="cloud-bom-balance" type="number" step="0.01" inputmode="decimal" placeholder="0.00" oninput="bankRecBalanceChanged()"></label>
+          <label>EOM balance<input id="cloud-eom-balance" type="number" step="0.01" inputmode="decimal" placeholder="0.00" oninput="bankRecBalanceChanged()"></label>
+        </div>
+        <div class="cloud-state" id="cloud-state">Starting demo workspace...</div>
+      </div>
+    </div>
+
+    <div class="sidebar-card">
+      <div class="sidebar-title">Source Files</div>
+
+      <div class="upload-zone" id="zone-bank" onclick="document.getElementById('file-bank').click()" ondragover="dragOver(event,'zone-bank')" ondragleave="dragLeave('zone-bank')" ondrop="dropFile(event,'bank')">
+        <input type="file" id="file-bank" accept=".csv,.txt,.xls,.xlsx" onchange="loadFile('bank',this.files[0])">
+        <div class="upload-head">Bank Export</div>
+        <div class="upload-sub">Required</div>
+        <div class="upload-status" id="status-bank"></div>
+        <div class="mapping-preview" id="preview-bank"></div>
+      </div>
+
+      <div class="upload-zone" id="zone-gj" onclick="document.getElementById('file-gj').click()" ondragover="dragOver(event,'zone-gj')" ondragleave="dragLeave('zone-gj')" ondrop="dropFile(event,'gj')">
+        <input type="file" id="file-gj" accept=".csv,.txt,.xls,.xlsx" onchange="loadFile('gj',this.files[0])">
+        <div class="upload-head">General Journal</div>
+        <div class="upload-sub">Manual entries</div>
+        <div class="upload-status" id="status-gj"></div>
+        <div class="mapping-preview" id="preview-gj"></div>
+      </div>
+
+      <div class="upload-zone" id="zone-checks" onclick="document.getElementById('file-checks').click()" ondragover="dragOver(event,'zone-checks')" ondragleave="dragLeave('zone-checks')" ondrop="dropFile(event,'checks')">
+        <input type="file" id="file-checks" accept=".csv,.txt,.xls,.xlsx" onchange="loadFile('checks',this.files[0])">
+        <div class="upload-head">Cash Disbursements</div>
+        <div class="upload-sub">Checks and uploaded invoices</div>
+        <div class="upload-status" id="status-checks"></div>
+        <div class="mapping-preview" id="preview-checks"></div>
+      </div>
+
+      <div class="upload-zone" id="zone-deposits" onclick="document.getElementById('file-deposits').click()" ondragover="dragOver(event,'zone-deposits')" ondragleave="dragLeave('zone-deposits')" ondrop="dropFile(event,'deposits')">
+        <input type="file" id="file-deposits" accept=".csv,.txt,.xls,.xlsx" onchange="loadFile('deposits',this.files[0])">
+        <div class="upload-head">Cash Receipts</div>
+        <div class="upload-sub">Receipts and deposit matching</div>
+        <div class="upload-status" id="status-deposits"></div>
+        <div class="mapping-preview" id="preview-deposits"></div>
+      </div>
+
+      <div class="upload-zone" id="zone-coa" onclick="document.getElementById('file-coa').click()" ondragover="dragOver(event,'zone-coa')" ondragleave="dragLeave('zone-coa')" ondrop="dropFile(event,'coa')">
+        <input type="file" id="file-coa" accept=".csv,.txt,.xls,.xlsx" onchange="loadFile('coa',this.files[0])">
+        <div class="upload-head">Chart of Accounts</div>
+        <div class="upload-sub">Use official account descriptions</div>
+        <div class="upload-status" id="status-coa"></div>
+        <div class="mapping-preview" id="preview-coa"></div>
+      </div>
+    </div>
+
+    <div class="sidebar-card">
+      <div class="sidebar-title">Actions</div>
+      <div class="action-stack">
+        <div class="action-group">
+          <div class="action-label"><span class="action-number">1</span> Process</div>
+          <button class="btn btn-primary action-wide" id="run-btn" onclick="runMatch()" disabled>Match Transactions</button>
+        </div>
+        <div class="action-group">
+          <div class="action-label"><span class="action-number">2</span> Working tools</div>
+          <div class="action-tools">
+            <button class="btn btn-muted" onclick="openScratchSheet()">Scratch</button>
+            <button class="btn btn-muted" onclick="openJournal()">Journal</button>
+            <button class="btn btn-muted" onclick="exportCSV()">Export</button>
+          </div>
+        </div>
+        <div class="action-group">
+          <div class="action-label"><span class="action-number">3</span> Save &amp; switch</div>
+          <div class="action-save-state" id="action-save-state">Save once to begin secure autosave.</div>
+          <button class="btn btn-primary action-wide" id="action-save-btn" onclick="saveNamedSession()">Save</button>
+          <div class="saved-switch">
+            <select id="saved-session-select" class="select" onchange="handleSavedSessionChange()">
+              <option value="">Open another saved Bank Rec...</option>
+            </select>
+            <button class="btn btn-danger-soft" id="delete-session-btn" onclick="deleteNamedSession()" disabled>Delete</button>
+          </div>
+        </div>
+        <div class="action-group">
+          <div class="action-label"><span class="action-number">4</span> Finish</div>
+          <button class="btn btn-muted action-wide" onclick="closeWorkspace()">Close Workspace</button>
+          <button class="btn btn-complete action-wide" onclick="completeAndClear()">Complete &amp; Clear</button>
+          <div class="upload-sub">Close saves and exits. Complete &amp; Clear keeps only the completion summary. The red Delete beside a saved reconciliation removes it entirely.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="sidebar-card" id="stats-wrap" style="display:none;">
+      <div class="sidebar-title">Result Counts</div>
+      <div class="stat-grid">
+        <div class="stat green"><div class="num" id="stat-matched">0</div><div class="lbl">Matched</div></div>
+        <div class="stat amber"><div class="num" id="stat-review">0</div><div class="lbl">Review</div></div>
+        <div class="stat red"><div class="num" id="stat-journal">0</div><div class="lbl">Missing GJ</div></div>
+        <div class="stat purple"><div class="num" id="stat-income">0</div><div class="lbl">Missing CR</div></div>
+      </div>
+    </div>
+
+    <div class="sidebar-card" id="filter-wrap" style="display:none;">
+      <div class="sidebar-title">Quick Filter</div>
+      <div class="filter-list">
+        <button class="filter-btn active" onclick="setFilter('all',this)">All <span class="filter-badge" id="fb-all">0</span></button>
+        <button class="filter-btn" onclick="setFilter('matched',this)">Matched <span class="filter-badge" id="fb-matched">0</span></button>
+        <button class="filter-btn" onclick="setFilter('review',this)">Needs Review <span class="filter-badge" id="fb-review">0</span></button>
+        <button class="filter-btn" onclick="setFilter('resolved',this)">Resolved by Source <span class="filter-badge" id="fb-resolved">0</span></button>
+        <button class="filter-btn" onclick="setFilter('missing-cd',this)">Missing CD <span class="filter-badge" id="fb-cd">0</span></button>
+        <button class="filter-btn" onclick="setFilter('missing-gj',this)">Missing GJ <span class="filter-badge" id="fb-gj">0</span></button>
+        <button class="filter-btn" onclick="setFilter('source-decision',this)">Source Decision <span class="filter-badge" id="fb-source">0</span></button>
+        <button class="filter-btn" onclick="setFilter('income',this)">Missing CR <span class="filter-badge" id="fb-income">0</span></button>
+      </div>
+    </div>
+  </aside>
+
+  <main class="workspace">
+    <div class="topbar">
+      <div class="page-title">
+        <h2 id="title-main">Bank Reconciliation Workspace</h2>
+        <p id="title-sub">Upload files and run match to see bank on the left, books on the right, with balances and review status.</p>
+      </div>
+      <div class="toolbar">
+        <span class="cloud-badge" id="cloud-badge">Demo mode</span>
+        <span class="cloud-badge source-badge" id="source-badge">No bank file</span>
+        <button class="top-action primary" id="top-match-btn" onclick="runMatch()" disabled>Upload bank file</button>
+        <button class="top-action" id="scratch-btn" onclick="openScratchSheet()" disabled>Scratch Sheet</button>
+        <button class="top-action" id="sidebar-toggle-btn" onclick="toggleSidebar()">Hide Left Panel</button>
+        <button class="top-action" onclick="loadSampleData()">Load sample data</button>
+        <input class="search" id="search-input" type="text" placeholder="Search vendor, ref, amount..." oninput="handleSearchInput()">
+      </div>
+    </div>
+
+    <div class="body" id="workspace-body">
+      <!-- Guided start screen is rendered from current cloud and upload state. -->
+    </div>
+  </main>
+</div>
+
+<div class="journal-panel" id="journal-panel">
+  <div class="journal-header">
+    <div class="journal-header-title">Generated Journal Entries</div>
+    <button class="journal-close" onclick="closeJournal()">x</button>
+  </div>
+  <div class="journal-body" id="journal-body"></div>
+  <div class="journal-footer">
+    <button class="btn btn-primary" onclick="copyJournal()">Copy</button>
+    <button class="btn btn-muted" onclick="exportJournalCSV()">Export CSV</button>
+  </div>
+</div>
+
+<div class="scratch-panel" id="scratch-panel">
+  <div class="scratch-resizer" title="Drag to resize scratch sheet" onpointerdown="startScratchResize(event)"></div>
+  <div class="scratch-header">
+    <div>
+      <h2 id="scratch-title">Bank Rec Scratch Sheet</h2>
+      <p>Use values or formulas such as =1250+300, =A1-B1, or =SUM(B2:B8).</p>
+    </div>
+    <div class="scratch-head-actions">
+      <button class="btn btn-muted" onclick="clearScratchSheet()">Clear Sheet</button>
+      <button class="btn btn-muted" onclick="toggleSidebar()">Show/Hide Left</button>
+      <button class="btn btn-muted" onclick="closeScratchSheet()">Close</button>
+    </div>
+  </div>
+  <div class="scratch-grid-wrap" id="scratch-grid-wrap"></div>
+  <div class="scratch-footer">
+    <span id="scratch-status">Autosaves with this Bank Rec.</span>
+    <span>Arrow keys navigate · Enter moves down · Shift+Enter moves up</span>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+let bankData = [];
+let gjData = [];
+let checkData = [];
+let depositData = [];
+let coaData = [];
+let results = [];
+let expensePairs = [];
+let depositPairs = [];
+let journalEntries = [];
+let journalEntryOverrides = {};
+let currentFilter = 'all';
+let currentTab = 'expenses';
+let fileMappings = {bank:null, gj:null, checks:null, deposits:null, coa:null};
+let currentSort = {field:'date', direction:'desc'};
+let collapsedGroups = new Set();
+let reviewedPairIds = new Set();
+let pairResolutions = {};
+let currentSavedSessionName = '';
+let sourceFileNames = {bank:'', gj:'', checks:'', deposits:'', coa:''};
+const SESSION_KEY = 'demo-bank-rec-session-v1';
+const SAVED_SESSIONS_KEY = 'demo-bank-rec-saved-sessions-v1';
+const LEGACY_SESSION_KEYS = [];
+let accountCatalog = {};
+const BANK_REC_SUPABASE_URL = 'demo://local';
+const BANK_REC_SUPABASE_ANON_KEY = 'demo';
+let bankRecSb = null;
+let bankRecCloudReady = false;
+let bankRecCloudSessions = [];
+let bankRecCloudRules = [];
+let bankRecPropertyAccounts = [];
+let bankRecAccountPropertyCode = '';
+let currentCloudSessionId = '';
+let cloudAutosaveTimer = null;
+let cloudAutosaveBusy = false;
+let pendingCloudContext = null;
+let scratchCells = {};
+
+const VENDOR_MAP = [
+  {canonical:'ADP PAYROLL',type:'journal',glAcct:'60110',glDesc:'Payroll',keywords:['ADP WAGE PAY','ADP WAGEPAY','WAGE PAY']},
+  {canonical:'ADP WORKERS COMP',type:'journal',glAcct:'60185',glDesc:'Workers Comp',keywords:['ADP PAY BY PAY','ADP PAYBYPAY','PAY BY PAY']},
+  {canonical:'ADP PAYROLL FEE',type:'journal',glAcct:'60155',glDesc:'Payroll Fee',keywords:['ADP PAYROLL FEES','ADP FEES']},
+  {canonical:'ADP PAYROLL TAX',type:'journal',glAcct:'60120',glDesc:'Payroll Taxes',keywords:['ADP TAX','ADP PAYROLL TAX']},
+  {canonical:'PAYROLL',type:'journal',glAcct:'60110',glDesc:'Payroll',keywords:['PAYROLL']},
+  {canonical:'PAYROLL TAX',type:'journal',glAcct:'60120',glDesc:'Payroll Taxes',keywords:['PAYROLL TAX','TAX IMPND']},
+  {canonical:'PAYROLL FEE',type:'journal',glAcct:'60155',glDesc:'Payroll Fee',keywords:['PAYROLL FEE','BILL IMPND']},
+  {canonical:'HOME DEPOT',type:'invoice',glAcct:'63210',glDesc:'Supplies',keywords:['HOME DEPOT','HOMEDEPOT']},
+  {canonical:'CON EDISON',type:'invoice',glAcct:'60420',glDesc:'Electricity',keywords:['CON ED','CONED','CECONY']},
+  {canonical:'NATIONAL GRID',type:'invoice',glAcct:'60440',glDesc:'Gas / Heating',keywords:['NATIONAL GRID','NGRID']},
+  {canonical:'NYC WATER BOARD',type:'invoice',glAcct:'60460',glDesc:'Water / Sewer',keywords:['NYCWATERBOARD','NYC WATER BOARD','NYC WATER','WATER BOARD']},
+  {canonical:'VERIZON',type:'journal',glAcct:'63007',glDesc:'Cable / Internet',keywords:['VERIZON']},
+  {canonical:'T-MOBILE',type:'journal',glAcct:'63005',glDesc:'Telephone',keywords:['T MOBILE','TMOBILE','T-MOBILE']},
+  {canonical:'SPECTRUM',type:'invoice',glAcct:'63007',glDesc:'Cable / Internet',keywords:['SPECTRUM','CHARTER']},
+  {canonical:'PRIMO BRANDS',type:'journal',glAcct:'63070',glDesc:'Office Equipment',keywords:['PRIMO BRANDS','PRIMO']},
+  {canonical:'MICROSOFT',type:'journal',glAcct:'63015',glDesc:'Technology',keywords:['MSFT','MICROSOFT']},
+  {canonical:'ANALYSIS BANK CHARGE',type:'journal',glAcct:'63080',glDesc:'Bank Charges',keywords:['ANALYSIS SERVICE CHARGE','ANALYSIS SERVICE']},
+  {canonical:'PAYPAL',type:'journal',glAcct:'63080',glDesc:'Bank Charges',keywords:['PAYPAL']},
+  {canonical:'EQUIP FINANCING',type:'journal',glAcct:'63045',glDesc:'Equipment Lease',keywords:['EQUIP FINANCING','CNTRCT PMT']},
+  {canonical:'NYC DOF',type:'journal',glAcct:'60240',glDesc:'Taxes',keywords:['NYC DOF','NYC DEPT OF FIN']},
+  {canonical:'NYC DOB',type:'invoice',glAcct:'60760',glDesc:'Compliance',keywords:['NYC BUILDINGS','DEPARTMENT OF BUILDINGS']},
+  {canonical:'UNION BENEFITS',type:'invoice',glAcct:'60170',glDesc:'Health / Pension',keywords:['UNION BENEFIT FUND','UNION BENEFITS']},
+  {canonical:'FIRST MORTGAGE BANK',type:'invoice',glAcct:'60310',glDesc:'Mortgage Interest',keywords:['FIRST MORTGAGE BANK','FMB LOAN']},
+  {canonical:'METRO SAVINGS',type:'invoice',glAcct:'60310',glDesc:'Mortgage Interest',keywords:['METRO SAVINGS']},
+  {canonical:'HEALTH PLAN ADMIN',type:'journal',glAcct:'60175',glDesc:'Health Insurance',keywords:['HEALTH PLAN ADMIN','BENEFIT ADMIN']},
+  {canonical:'UNITED HEALTH CARE',type:'journal',glAcct:'60175',glDesc:'Health Insurance',keywords:['UNITED HEALTHCARE','UNITED HEALTH CARE','UHC']},
+  {canonical:'DENTAL PLAN',type:'journal',glAcct:'60175',glDesc:'Health Insurance',keywords:['DENTAL PLAN']},
+  {canonical:'MANAGING AGENT',type:'invoice',glAcct:'60750',glDesc:'Management Fee',keywords:['MANAGING AGENT','MGMT FEE','MGMNT']},
+  {canonical:'INSURANCE PREMIUM',type:'invoice',glAcct:'60510',glDesc:'Insurance - Property',keywords:['INSURANCE PREMIUM','INS PREM']},
+  {canonical:'INSURANCE REFUND',type:'income',glAcct:'40100',glDesc:'Maintenance Income',keywords:['INSURANCE REFUND']},
+  {canonical:'RENT PORTAL',type:'income',glAcct:'40100',glDesc:'Maintenance Income',keywords:['RENT PORTAL','BANKCARD','SETTLEMENT']},
+  {canonical:'LAUNDRY INCOME',type:'income',glAcct:'45000',glDesc:'Other Income',keywords:['LAUNDRY']},
+  {canonical:'INTEREST INCOME',type:'income',glAcct:'46200',glDesc:'Interest Income',keywords:['INTEREST']}
+];
+
+function dragOver(e,id){e.preventDefault();document.getElementById(id).classList.add('drag');}
+function dragLeave(id){document.getElementById(id).classList.remove('drag');}
+function dropFile(e,type){
+  e.preventDefault();
+  document.getElementById('zone-' + type).classList.remove('drag');
+  const file = e.dataTransfer.files[0];
+  if(file) loadFile(type,file);
+}
+
+async function loadFile(type,file){
+  if(!file) return;
+  let parsed = [];
+  const lower = (file.name || '').toLowerCase();
+  try{
+    if(lower.endsWith('.xlsx') || lower.endsWith('.xls')){
+      parsed = await parseWorkbookFile(file);
+    } else {
+      const text = await file.text();
+      parsed = parseCSV(text);
+      if(!parsed.length) parsed = parseTabDelimited(text);
+    }
+  }catch(error){
+    console.error(`Unable to read ${type} file`,error);
+    setStatus(type,`Could not read ${file.name}`,'err');
+    showToast(error?.message||'This file could not be read.');
+    return;
+  }
+
+  sourceFileNames[type] = file.name || '';
+
+  if(type === 'bank'){
+    bankData = parsed;
+    setStatus('bank', sourceStatusText('bank', bankData.length), bankData.length ? 'ok' : 'err');
+  } else if(type === 'gj'){
+    gjData = parsed;
+    setStatus('gj', sourceStatusText('gj', gjData.length), gjData.length ? 'ok' : 'err');
+  } else if(type === 'checks'){
+    checkData = parsed;
+    setStatus('checks', sourceStatusText('checks', checkData.length), checkData.length ? 'ok' : 'err');
+  } else if(type === 'deposits'){
+    depositData = parsed;
+    setStatus('deposits', sourceStatusText('deposits', depositData.length), depositData.length ? 'ok' : 'err');
+  } else if(type === 'coa'){
+    coaData = parsed;
+    accountCatalog = buildAccountCatalog(coaData);
+    setStatus('coa', sourceStatusText('coa', Object.keys(accountCatalog).length, 'accounts'), Object.keys(accountCatalog).length ? 'ok' : 'err');
+  }
+  fileMappings[type] = detectMappings(parsed, type);
+  renderMappingPreview(type);
+
+  results = [];
+  expensePairs = [];
+  depositPairs = [];
+  journalEntries = [];
+  journalEntryOverrides = {};
+  checkRunReady();
+  saveSessionState(false);
+  if(type === 'coa' && bankData.length){
+    runMatch();
+    return;
+  }
+  renderWorkspace();
+}
+
+async function parseWorkbookFile(file){
+  if(typeof XLSX === 'undefined'){
+    throw new Error('Excel reader did not load. Redeploy xlsx.full.min.js, then refresh and try again.');
+  }
+  const buffer = await file.arrayBuffer();
+  const workbook = XLSX.read(buffer, {type:'array', cellDates:true});
+  const allRows = [];
+  workbook.SheetNames.forEach(sheetName => {
+    const sheet = workbook.Sheets[sheetName];
+    const parsed = worksheetToObjects(sheet);
+    parsed.forEach(row => row.__sheet = sheetName);
+    allRows.push(...parsed);
+  });
+  return allRows;
+}
+
+function worksheetToObjects(sheet){
+  const aoa = XLSX.utils.sheet_to_json(sheet, {header:1, defval:'', raw:false, blankrows:false});
+  if(!aoa.length) return [];
+  const headerIndex = detectHeaderRow(aoa);
+  const headers = buildHeaders(aoa[headerIndex] || []);
+  return aoa.slice(headerIndex + 1).map(row => {
+    const obj = {};
+    headers.forEach((header, index) => obj[header] = String(row[index] ?? '').trim());
+    return obj;
+  }).filter(row => Object.values(row).some(v => String(v || '').trim() !== ''));
+}
+
+function detectHeaderRow(rows){
+  let bestIndex = 0;
+  let bestScore = -1;
+  const headerHints = ['date','amount','description','source','check','ref','deposit','credit','debit','vendor','subsidiary'];
+  const limit = Math.min(rows.length, 12);
+  for(let i = 0; i < limit; i++){
+    const row = rows[i] || [];
+    const filled = row.filter(v => String(v || '').trim() !== '');
+    if(!filled.length) continue;
+    const hintHits = filled.reduce((sum, value) => {
+      const norm = normalizeHeader(value);
+      return sum + (headerHints.some(h => norm.includes(h)) ? 2 : 0);
+    }, 0);
+    const score = filled.length + hintHits;
+    if(score > bestScore){
+      bestScore = score;
+      bestIndex = i;
+    }
+  }
+  return bestIndex;
+}
+
+function buildHeaders(row){
+  const used = {};
+  return row.map((value, index) => {
+    let base = String(value || '').trim();
+    if(!base) base = `Column ${index + 1}`;
+    if(used[base] != null){
+      used[base] += 1;
+      base = `${base} ${used[base]}`;
+    } else {
+      used[base] = 1;
+    }
+    return base;
+  });
+}
+
+function setStatus(type,text,cls){
+  const el = document.getElementById('status-' + type);
+  el.textContent = text;
+  el.title = text;
+  el.className = 'upload-status ' + cls;
+  const zone = document.getElementById('zone-' + type);
+  if(zone) zone.classList.toggle('loaded', cls === 'ok');
+}
+
+function sourceStatusText(type,count,unit='rows'){
+  const fileName = sourceFileNames[type] || '';
+  return `${count} ${unit}${fileName ? ` · ${fileName}` : ''}`;
+}
+
+function renderMappingPreview(type){
+  const el = document.getElementById('preview-' + type);
+  if(!el) return;
+  const map = fileMappings[type];
+  if(!map){
+    el.innerHTML = '';
+    el.className = 'mapping-preview';
+    return;
+  }
+  const lines = type === 'coa'
+    ? [
+        ['Account', map.account],
+        ['Description', map.description],
+        ['Abbrev', map.abbreviation],
+        ['Group', map.group],
+        ['Disabled', map.disabled]
+      ]
+    : [
+        ['Date', map.date],
+        ['Amount', map.amount],
+        ['Vendor', map.vendor],
+        ['Ref', map.reference],
+        ['Desc', map.description]
+      ];
+  el.innerHTML = lines.map(([k,v]) => `<div class="map-row"><span class="map-key">${k}</span><span class="map-val">${escapeHtml(v || '-')}</span></div>`).join('');
+  el.className = 'mapping-preview show';
+}
+
+function checkRunReady(){
+  const bankReady = bankData.length > 0;
+  const runButton = document.getElementById('run-btn');
+  if(runButton){
+    runButton.disabled = !bankReady;
+    runButton.textContent=!bankReady?'Upload Bank File First':(results.length?'Refresh Matches':'Match Transactions');
+  }
+  const topMatch = document.getElementById('top-match-btn');
+  if(topMatch){
+    topMatch.disabled = !bankReady;
+    topMatch.textContent = !bankReady ? 'Upload bank file' : (results.length ? 'Refresh Match' : 'Run Match');
+  }
+  const bookSources = [gjData,checkData,depositData,coaData].filter(rows => rows.length > 0).length;
+  const sourceBadge = document.getElementById('source-badge');
+  if(sourceBadge){
+    sourceBadge.textContent = bankReady ? `Bank + ${bookSources} book source${bookSources === 1 ? '' : 's'}` : 'No bank file';
+    sourceBadge.classList.toggle('complete', bankReady);
+  }
+  const context = cloudContextValues();
+  updateActionSaveUI(bankReady,context);
+  const scratchButton = document.getElementById('scratch-btn');
+  if(scratchButton) scratchButton.disabled = !context.propertyCode || !context.reportingMonth;
+}
+
+function disconnectCloudAutosave(){
+  clearTimeout(cloudAutosaveTimer);
+  cloudAutosaveTimer=null;
+  currentCloudSessionId='';
+  currentSavedSessionName='';
+}
+
+function clearAll(message='Draft cleared'){
+  closeScratchSheet();
+  disconnectCloudAutosave();
+  bankData = [];
+  gjData = [];
+  checkData = [];
+  depositData = [];
+  results = [];
+  expensePairs = [];
+  depositPairs = [];
+  journalEntries = [];
+  journalEntryOverrides = {};
+  currentFilter = 'all';
+  currentTab = 'expenses';
+  ['bank','gj','checks','deposits','coa'].forEach(type => {
+    const input = document.getElementById('file-' + type);
+    const status = document.getElementById('status-' + type);
+    const preview = document.getElementById('preview-' + type);
+    const zone = document.getElementById('zone-' + type);
+    if(input) input.value = '';
+    if(status){ status.textContent = ''; status.className = 'upload-status'; }
+    if(preview){ preview.innerHTML = ''; preview.className = 'mapping-preview'; }
+    if(zone) zone.classList.remove('loaded');
+  });
+  fileMappings = {bank:null, gj:null, checks:null, deposits:null, coa:null};
+  coaData = [];
+  accountCatalog = {};
+  collapsedGroups = new Set();
+  reviewedPairIds = new Set();
+  pairResolutions = {};
+  scratchCells = {};
+  ['cloud-bom-balance','cloud-eom-balance'].forEach(id => {
+    const input=document.getElementById(id);
+    if(input)input.value='';
+  });
+  document.getElementById('search-input').value = '';
+  currentSort = {field:'date', direction:'desc'};
+  sourceFileNames = {bank:'', gj:'', checks:'', deposits:'', coa:''};
+  document.querySelectorAll('.filter-btn').forEach((btn,i) => btn.classList.toggle('active', i === 0));
+  clearSavedSession();
+  checkRunReady();
+  renderWorkspace();
+  setCloudState(bankRecCloudReady?'Connected · no active Bank Rec':'Workspace unavailable','ready');
+  showToast(message);
+}
+
+async function closeWorkspace(){
+  const hasWork = bankData.length || gjData.length || checkData.length || depositData.length || coaData.length || results.length || Object.keys(scratchCells).length;
+  if(currentCloudSessionId){
+    setCloudState('Saving before close…');
+    const saved=await flushCloudAutosave();
+    if(!saved){showToast('Could not close because cloud save failed');return;}
+    clearAll('Workspace saved and closed');
+    return;
+  }
+  if(currentSavedSessionName){clearAll('Saved workspace closed');return;}
+  if(hasWork&&!window.confirm('Close and discard this unsaved workspace?\n\nFiles, matches, review work, and scratch calculations on this screen cannot be recovered.'))return;
+  clearAll('Workspace closed');
+}
+
+async function completeAndClear(){
+  if(!bankRecCloudReady){
+    showToast('Cloud connection is required to complete a Bank Rec');
+    return;
+  }
+  if(!currentCloudSessionId){
+    showToast('Save this Bank Rec first, then choose Complete & Clear');
+    return;
+  }
+  if(!results.length){
+    showToast('Run Match before completing this Bank Rec');
+    return;
+  }
+  const summary=calculateSummary();
+  const expenseGap=Number(summary.expenses?.openGap||0);
+  const depositGap=Number(summary.deposits?.openGap||0);
+  const netOpenGap=expenseGap+depositGap;
+  const context=cloudContextValues();
+  const warning=Math.abs(netOpenGap)>0.005
+    ? `\n\nWarning: the current net open difference is ${moneySigned(netOpenGap)}.`
+    : '\n\nThe current net open difference is $0.00.';
+  const confirmed=window.confirm(
+    `Complete and permanently clear this Bank Rec?${warning}\n\nDetailed bank, GJ, CD, CR, matching, review, journal, and scratch-sheet calculations will be deleted and cannot be reopened. Only minimal completion information and separately approved reusable rules/patterns will remain.`
+  );
+  if(!confirmed)return;
+  try{
+    const {data:{user}}=await bankRecSb.auth.getUser();
+    const completedAt=new Date().toISOString();
+    const completionSummary={
+      completion_record:true,
+      property_code:context.propertyCode||null,
+      reporting_month:context.reportingMonth||null,
+      bank_account_last4:context.bankAccountLast4||null,
+      completed_at:completedAt,
+      completed_by:user.id,
+      expense_open_difference:expenseGap,
+      deposit_open_difference:depositGap,
+      final_difference:netOpenGap,
+      beginning_balance:summary.balanceControl.beginningBalance,
+      statement_ending_balance:summary.balanceControl.endingBalance,
+      calculated_ending_balance:summary.balanceControl.calculatedEndingBalance,
+      statement_balance_difference:summary.balanceControl.difference
+    };
+    const completedId=currentCloudSessionId;
+    const {error}=await bankRecSb.from('bank_reconciliations').update({
+      status:'completed',
+      workspace:{},
+      summary:completionSummary,
+      rules_snapshot:[],
+      updated_by:user.id,
+      updated_at:completedAt
+    }).eq('id',completedId);
+    if(error)throw error;
+    clearAll('Bank Rec completed and detailed data deleted');
+    await loadCloudSessionList();
+    setCloudState(`Completed · detailed workspace deleted · ${new Date(completedAt).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'})}`,'ready');
+  }catch(error){
+    showToast(`Complete & Clear failed: ${error.message}`);
+  }
+}
+
+function handleSearchInput(){
+  saveSessionState(false);
+  renderWorkspace();
+}
+
+function buildSessionPayload(includeComputed = true){
+  const payload = {
+    bankData,
+    gjData,
+    checkData,
+    depositData,
+    coaData,
+    currentFilter,
+    currentTab,
+    fileMappings,
+    currentSort,
+    collapsedGroups:[...collapsedGroups],
+    reviewedPairIds:[...reviewedPairIds],
+    pairResolutions,
+    journalEntryOverrides,
+    currentSavedSessionName,
+    sourceFileNames,
+    cloudContext:cloudContextValues(),
+    scratchCells,
+    searchValue:document.getElementById('search-input') ? document.getElementById('search-input').value : ''
+  };
+  if(includeComputed){
+    payload.results = results;
+    payload.expensePairs = expensePairs;
+    payload.depositPairs = depositPairs;
+    payload.journalEntries = journalEntries;
+  }
+  return payload;
+}
+
+function saveSessionState(includeComputed = true){
+  try{
+    const payload = buildSessionPayload(includeComputed);
+    localStorage.setItem(SESSION_KEY, JSON.stringify(payload));
+    queueCloudAutosave();
+  } catch (err){
+    console.warn('Unable to save session', err);
+  }
+}
+
+function clearSavedSession(){
+  try{
+    localStorage.removeItem(SESSION_KEY);
+  } catch (err){
+    console.warn('Unable to clear session', err);
+  }
+}
+
+function getSavedSessionsMap(){
+  try{
+    return JSON.parse(localStorage.getItem(SAVED_SESSIONS_KEY) || '{}') || {};
+  } catch (err){
+    console.warn('Unable to read saved bank recs', err);
+    return {};
+  }
+}
+
+function setSavedSessionsMap(map){
+  try{
+    localStorage.setItem(SAVED_SESSIONS_KEY, JSON.stringify(map));
+    return true;
+  } catch (err){
+    console.warn('Unable to write saved bank recs', err);
+    return false;
+  }
+}
+
+function cloudContextValues(){
+  const propertyCode = document.getElementById('cloud-property')?.value || '';
+  const reportingMonth = document.getElementById('cloud-month')?.value || '';
+  const bankAccountLabel = document.getElementById('cloud-account-label')?.value.trim() || '';
+  const bankAccountLast4 = document.getElementById('cloud-account-last4')?.value.replace(/\D/g,'').slice(-4) || '';
+  const beginningBalance = parseManualBalance(document.getElementById('cloud-bom-balance')?.value);
+  const endingBalance = parseManualBalance(document.getElementById('cloud-eom-balance')?.value);
+  return {propertyCode,reportingMonth,bankAccountLabel,bankAccountLast4,beginningBalance,endingBalance};
+}
+
+function bankRecAccountDisplay(account){
+  return [account.num,account.name].filter(Boolean).join(' · ')||account.name||account.num||'Bank account';
+}
+
+function bankRecAccountChanged(){
+  const select=document.getElementById('cloud-account-label');
+  const last4Input=document.getElementById('cloud-account-last4');
+  const option=select?.selectedOptions?.[0];
+  if(last4Input&&option){
+    const mapped=String(option.dataset.last4||'').replace(/\D/g,'').slice(-4);
+    last4Input.value=mapped;
+    last4Input.readOnly=Boolean(mapped);
+    last4Input.placeholder=mapped?'Auto':'Enter once';
+    last4Input.title=mapped?'Loaded from the demo account list':'No saved bank-account digits were found for this GL account';
+  }
+  bankRecCloudDetailsChanged();
+}
+
+function selectBankRecAccountContext(context={}){
+  const select=document.getElementById('cloud-account-label');
+  const last4Input=document.getElementById('cloud-account-last4');
+  if(!select)return;
+  const label=String(context.bankAccountLabel||'').trim(),last4=String(context.bankAccountLast4||'').replace(/\D/g,'').slice(-4);
+  let option=[...select.options].find(item=>item.value===label);
+  if(!option&&last4)option=[...select.options].find(item=>item.dataset.last4===last4);
+  if(!option&&label){
+    const normalized=label.toLowerCase();
+    option=[...select.options].find(item=>String(item.dataset.accountName||'').toLowerCase()===normalized||String(item.dataset.accountNumber||'')===normalized);
+  }
+  if(!option&&label){
+    option=document.createElement('option');
+    option.value=label;
+    option.textContent=`${label}${last4?` · ****${last4}`:''} · saved`;
+    option.dataset.last4=last4;
+    option.dataset.legacy='true';
+    select.appendChild(option);
+  }
+  select.value=option?.value||'';
+  const mapped=String(option?.dataset.last4||last4||'').replace(/\D/g,'').slice(-4);
+  if(last4Input){last4Input.value=mapped;last4Input.readOnly=Boolean(option?.dataset.last4);last4Input.placeholder=mapped?'Auto':'Enter once';}
+}
+
+async function loadBankRecAccountOptions(propertyCode,preferredContext=null){
+  const select=document.getElementById('cloud-account-label');
+  const last4Input=document.getElementById('cloud-account-last4');
+  if(!select)return;
+  const context=preferredContext||(bankRecAccountPropertyCode===propertyCode?cloudContextValues():{propertyCode,bankAccountLabel:'',bankAccountLast4:''});
+  if(!propertyCode){
+    bankRecPropertyAccounts=[];
+    bankRecAccountPropertyCode='';
+    select.innerHTML='<option value="">Choose property first...</option>';
+    if(last4Input){last4Input.value='';last4Input.readOnly=false;last4Input.placeholder='Auto';}
+    return;
+  }
+  select.disabled=true;
+  select.innerHTML='<option value="">Loading accounts...</option>';
+  try{
+    const [accountsResponse,mappingResponse]=await Promise.all([
+      bankRecSb.from('accounts').select('id,property_code,name,num,type,sort_order').eq('property_code',propertyCode).order('sort_order'),
+      bankRecSb.rpc('visible_account_mapping_last4')
+    ]);
+    if(accountsResponse.error)throw accountsResponse.error;
+    if(mappingResponse.error)console.warn('Bank-account last-four mapping could not be loaded:',mappingResponse.error.message||mappingResponse.error);
+    const mappingByAccount=new Map((mappingResponse.data||[]).filter(row=>row.property_code===propertyCode).map(row=>[String(row.account_id),String(row.account_last4||row.account_last5||'').replace(/\D/g,'').slice(-4)]));
+    const allAccounts=(accountsResponse.data||[]).map(account=>({...account,last4:mappingByAccount.get(String(account.id))||''}));
+    bankRecPropertyAccounts=allAccounts.filter(account=>/^100\d*/.test(String(account.num||'').replace(/\D/g,''))||/operating|reserve|cash|checking|savings|money market|certificate|\bcd\b/i.test(`${account.type||''} ${account.name||''}`));
+    if(!bankRecPropertyAccounts.length)bankRecPropertyAccounts=allAccounts.filter(account=>account.last4);
+    bankRecAccountPropertyCode=propertyCode;
+    select.innerHTML='<option value="">Choose account...</option>'+bankRecPropertyAccounts.map(account=>{
+      const label=bankRecAccountDisplay(account),suffix=account.last4?` · ****${account.last4}`:' · last 4 not saved';
+      return `<option value="${escapeHtml(label)}" data-account-id="${escapeHtml(account.id)}" data-account-number="${escapeHtml(account.num||'')}" data-account-name="${escapeHtml(account.name||'')}" data-last4="${escapeHtml(account.last4)}">${escapeHtml(label+suffix)}</option>`;
+    }).join('');
+    selectBankRecAccountContext(context);
+  }catch(error){
+    console.error('Bank account choices could not be loaded',error);
+    select.innerHTML='<option value="">Account list unavailable</option>';
+    selectBankRecAccountContext(context);
+    setCloudState(`Account list unavailable · ${error.message}`,'error');
+  }finally{select.disabled=false;}
+}
+
+function parseManualBalance(value){
+  const clean=String(value??'').replace(/[$,\s]/g,'');
+  if(!clean)return null;
+  const parsed=Number(clean);
+  return Number.isFinite(parsed)?parsed:null;
+}
+
+function applyCloudContext(context){
+  if(!context) return;
+  const month = document.getElementById('cloud-month');
+  const accountLabel = document.getElementById('cloud-account-label');
+  const accountLast4 = document.getElementById('cloud-account-last4');
+  const beginningBalance = document.getElementById('cloud-bom-balance');
+  const endingBalance = document.getElementById('cloud-eom-balance');
+  const property = document.getElementById('cloud-property');
+  if(month && context.reportingMonth) month.value = String(context.reportingMonth).slice(0,7);
+  if(accountLabel) selectBankRecAccountContext(context);
+  if(accountLast4 && !accountLabel && context.bankAccountLast4 != null) accountLast4.value = context.bankAccountLast4;
+  if(beginningBalance) beginningBalance.value = context.beginningBalance == null ? '' : context.beginningBalance;
+  if(endingBalance) endingBalance.value = context.endingBalance == null ? '' : context.endingBalance;
+  if(property && context.propertyCode && [...property.options].some(option => option.value === context.propertyCode)){
+    property.value = context.propertyCode;
+  }
+  checkRunReady();
+}
+
+function inferReportingMonth(){
+  const counts = {};
+  buildBankTxs().forEach(tx => {
+    if(!tx.date || Number.isNaN(tx.date.getTime())) return;
+    const key = `${tx.date.getFullYear()}-${String(tx.date.getMonth()+1).padStart(2,'0')}`;
+    counts[key] = (counts[key] || 0) + 1;
+  });
+  return Object.entries(counts).sort((a,b) => b[1]-a[1] || b[0].localeCompare(a[0]))[0]?.[0] || '';
+}
+
+function setCloudState(message,tone=''){
+  const state=document.getElementById('cloud-state');
+  if(state){state.textContent=message;state.className='cloud-state'+(tone?' '+tone:'');}
+  updateActionSaveUI();
+}
+
+function updateActionSaveUI(bankReady=bankData.length>0,context=cloudContextValues()){
+  const button=document.getElementById('action-save-btn');
+  const state=document.getElementById('action-save-state');
+  const ready=bankReady&&context.propertyCode&&context.reportingMonth;
+  if(button){
+    button.disabled=!!currentCloudSessionId||!ready;
+    button.textContent=currentCloudSessionId?'Autosave Active':'Save';
+    button.classList.toggle('btn-primary',!currentCloudSessionId);
+    button.classList.toggle('btn-complete',!!currentCloudSessionId);
+  }
+  if(state){
+    state.classList.toggle('saved',!!currentCloudSessionId);
+    state.textContent=currentCloudSessionId
+      ? `Autosave active${currentSavedSessionName?` · ${currentSavedSessionName}`:''}`
+      : ready?'Ready to save. After the first save, changes are automatic.':'Choose property and month, then upload the bank file.';
+  }
+}
+
+function bankRecCloudContextChanged(){
+  currentCloudSessionId='';
+  currentSavedSessionName='';
+  populateSavedSessionsSelect();
+  saveSessionState(false);
+  checkRunReady();
+  if(!results.length)renderWorkspace();
+  if(bankRecCloudReady){
+    const propertyCode=document.getElementById('cloud-property')?.value||'';
+    Promise.all([loadCloudRules(propertyCode),loadBankRecAccountOptions(propertyCode)]).then(()=>{if(bankData.length)runMatch();}).catch(error=>setCloudState(`Property setup failed · ${error.message}`,'error'));
+  }
+}
+
+function bankRecCloudDetailsChanged(){
+  saveSessionState(false);
+  checkRunReady();
+}
+
+function bankRecBalanceChanged(){
+  saveSessionState(false);
+  if(results.length)renderWorkspace();
+}
+
+function populateSavedSessionsSelect(){
+  const select = document.getElementById('saved-session-select');
+  if(!select) return;
+  const saved = getSavedSessionsMap();
+  const current = currentCloudSessionId
+    ? `cloud:${currentCloudSessionId}`
+    : (currentSavedSessionName?`local:${currentSavedSessionName}`:'');
+  const names = Object.keys(saved).sort((a,b) => {
+    const aTime = saved[a]?.savedAt || '';
+    const bTime = saved[b]?.savedAt || '';
+    return aTime < bTime ? 1 : -1;
+  });
+  const propertyCode=document.getElementById('cloud-property')?.value||'';
+  const optionHtml=row=>`<option value="cloud:${escapeHtml(row.id)}">${escapeHtml(row.property_code)} · ${escapeHtml(String(row.reporting_month||'').slice(0,7))} · ${escapeHtml(row.name)}${row.bank_account_last4?` · ****${escapeHtml(row.bank_account_last4)}`:''}</option>`;
+  const currentPropertyRows=propertyCode?bankRecCloudSessions.filter(row=>row.property_code===propertyCode):bankRecCloudSessions;
+  const otherPropertyRows=propertyCode?bankRecCloudSessions.filter(row=>row.property_code!==propertyCode):[];
+  const totalSaved=bankRecCloudSessions.length+names.length;
+  let options=`<option value="">Open saved Bank Rec${totalSaved?` (${totalSaved})`:''}...</option>`;
+  if(currentPropertyRows.length){
+    options+=`<optgroup label="${propertyCode?'Current property':'Saved Bank Recs'}">${currentPropertyRows.map(optionHtml).join('')}</optgroup>`;
+  }
+  if(otherPropertyRows.length){
+    options+=`<optgroup label="Other properties">${otherPropertyRows.map(optionHtml).join('')}</optgroup>`;
+  }
+  if(names.length){
+    options+=`<optgroup label="Saved on this computer">${names.map(name=>`<option value="local:${escapeHtml(name)}">Local · ${escapeHtml(name)}</option>`).join('')}</optgroup>`;
+  }
+  select.innerHTML=options;
+  if(current&&[...select.options].some(option=>option.value===current))select.value=current;
+  const deleteButton=document.getElementById('delete-session-btn');
+  if(deleteButton)deleteButton.disabled=!select.value;
+}
+
+function defaultSessionName(){
+  const context=cloudContextValues();
+  if(context.bankAccountLabel||context.bankAccountLast4){
+    return `${context.bankAccountLabel||'Bank account'}${context.bankAccountLast4?` · ****${context.bankAccountLast4}`:''}`;
+  }
+  const title = document.getElementById('title-main')?.textContent?.trim();
+  if(title && /Bank Reconciliation For/i.test(title)) return title.replace(/^Bank Reconciliation For\s*/i,'').trim();
+  const bankName = document.querySelector('#status-bank')?.textContent?.trim();
+  if(bankName) return `Bank Rec ${bankName}`;
+  return `Bank Rec ${new Date().toLocaleString()}`;
+}
+
+async function saveNamedSession(){
+  if(!bankData.length){
+    showToast('Upload and match a bank rec first');
+    return;
+  }
+  const cleanName = currentSavedSessionName||defaultSessionName();
+  if(bankRecCloudReady){
+    const context=cloudContextValues();
+    if(!context.propertyCode||!context.reportingMonth){
+      showToast('Choose a property and reporting month first');
+      return;
+    }
+    if(context.bankAccountLast4&&context.bankAccountLast4.length!==4){
+      showToast('Bank account last 4 must contain four digits');
+      return;
+    }
+    const {data:{user}}=await bankRecSb.auth.getUser();
+    const record={
+      property_code:context.propertyCode,
+      name:cleanName,
+      reporting_month:`${context.reportingMonth}-01`,
+      bank_account_label:context.bankAccountLabel||null,
+      bank_account_last4:context.bankAccountLast4||null,
+      status:'draft',
+      workspace:buildSessionPayload(false),
+      summary:results.length?calculateSummary():{},
+      rules_snapshot:effectiveVendorMap(),
+      updated_by:user.id,
+      updated_at:new Date().toISOString()
+    };
+    let response;
+    if(currentCloudSessionId) response=await bankRecSb.from('bank_reconciliations').update(record).eq('id',currentCloudSessionId).select('id').single();
+    else response=await bankRecSb.from('bank_reconciliations').insert({...record,created_by:user.id}).select('id').single();
+    if(response.error){showToast(`Cloud save failed: ${response.error.message}`);return;}
+    currentCloudSessionId=response.data.id;
+    currentSavedSessionName=cleanName;
+    await loadCloudSessionList();
+    document.getElementById('saved-session-select').value=`cloud:${currentCloudSessionId}`;
+    const deleteButton=document.getElementById('delete-session-btn');
+    if(deleteButton)deleteButton.disabled=false;
+    setCloudState(`Saved · ${new Date().toLocaleTimeString([],{hour:'numeric',minute:'2-digit'})}`,'ready');
+    checkRunReady();
+    showToast('Bank rec saved in this browser');
+    return;
+  }
+  const saved = getSavedSessionsMap();
+  currentSavedSessionName = cleanName;
+  saved[cleanName] = {
+    savedAt:new Date().toISOString(),
+    payload:buildSessionPayload(false)
+  };
+  if(!setSavedSessionsMap(saved)){
+    showToast('Unable to save bank rec. Try clearing old saved recs or loading fewer files.');
+    return;
+  }
+  populateSavedSessionsSelect();
+  const select = document.getElementById('saved-session-select');
+  if(select) select.value = `local:${cleanName}`;
+  const deleteButton=document.getElementById('delete-session-btn');
+  if(deleteButton)deleteButton.disabled=false;
+  showToast('Bank rec saved locally');
+}
+
+async function handleSavedSessionChange(){
+  const select=document.getElementById('saved-session-select');
+  const deleteButton=document.getElementById('delete-session-btn');
+  if(deleteButton)deleteButton.disabled=!select?.value;
+  if(!select?.value)return;
+  const activeValue=currentCloudSessionId?`cloud:${currentCloudSessionId}`:(currentSavedSessionName?`local:${currentSavedSessionName}`:'');
+  if(select.value===activeValue)return;
+  if(currentCloudSessionId){
+    setCloudState('Saving before switching…');
+    const saved=await flushCloudAutosave();
+    if(!saved){
+      showToast('Could not switch because the current Bank Rec did not save');
+      select.value=activeValue;
+      return;
+    }
+  }
+  await loadNamedSession();
+}
+
+function applySessionPayload(saved, sessionName = ''){
+  bankData = Array.isArray(saved.bankData) ? saved.bankData : [];
+  gjData = Array.isArray(saved.gjData) ? saved.gjData : [];
+  checkData = Array.isArray(saved.checkData) ? saved.checkData : [];
+  depositData = Array.isArray(saved.depositData) ? saved.depositData : [];
+  coaData = Array.isArray(saved.coaData) ? saved.coaData : [];
+  results = Array.isArray(saved.results) ? saved.results : [];
+  expensePairs = Array.isArray(saved.expensePairs) ? saved.expensePairs : [];
+  depositPairs = Array.isArray(saved.depositPairs) ? saved.depositPairs : [];
+  journalEntries = Array.isArray(saved.journalEntries) ? saved.journalEntries : [];
+  journalEntryOverrides = saved.journalEntryOverrides && typeof saved.journalEntryOverrides === 'object' && !Array.isArray(saved.journalEntryOverrides) ? {...saved.journalEntryOverrides} : {};
+  accountCatalog = buildAccountCatalog(coaData);
+  currentFilter = saved.currentFilter || 'all';
+  if(['reviewed','resolved-other'].includes(currentFilter)) currentFilter = 'all';
+  currentTab = saved.currentTab || 'expenses';
+  fileMappings = saved.fileMappings || {bank:null, gj:null, checks:null, deposits:null, coa:null};
+  currentSort = saved.currentSort || {field:'date', direction:'desc'};
+  collapsedGroups = new Set(Array.isArray(saved.collapsedGroups) ? saved.collapsedGroups : []);
+  reviewedPairIds = new Set(Array.isArray(saved.reviewedPairIds) ? saved.reviewedPairIds : []);
+  pairResolutions = saved.pairResolutions && typeof saved.pairResolutions === 'object' && !Array.isArray(saved.pairResolutions) ? {...saved.pairResolutions} : {};
+  scratchCells = saved.scratchCells && typeof saved.scratchCells === 'object' && !Array.isArray(saved.scratchCells) ? {...saved.scratchCells} : {};
+  currentSavedSessionName = sessionName || saved.currentSavedSessionName || '';
+  sourceFileNames = saved.sourceFileNames || {bank:'', gj:'', checks:'', deposits:'', coa:''};
+  applyCloudContext(saved.cloudContext || {reportingMonth:inferReportingMonth()});
+  const search = document.getElementById('search-input');
+  if(search) search.value = saved.searchValue || '';
+  [['bank', bankData], ['gj', gjData], ['checks', checkData], ['deposits', depositData]].forEach(([type, rows]) => {
+    if(rows.length){
+      setStatus(type, sourceStatusText(type, rows.length), 'ok');
+      if(!fileMappings[type]) fileMappings[type] = detectMappings(rows, type);
+      renderMappingPreview(type);
+    } else {
+      setStatus(type, '', '');
+      const preview = document.getElementById(`preview-${type}`);
+      if(preview) preview.innerHTML = '';
+    }
+  });
+  if(coaData.length){
+    setStatus('coa', sourceStatusText('coa', Object.keys(accountCatalog).length, 'accounts'), 'ok');
+    if(!fileMappings.coa) fileMappings.coa = detectMappings(coaData, 'coa');
+    renderMappingPreview('coa');
+  } else {
+    setStatus('coa', '', '');
+    const preview = document.getElementById('preview-coa');
+    if(preview) preview.innerHTML = '';
+  }
+  checkRunReady();
+  updateSideStats();
+  saveSessionState(true);
+  if(bankData.length){
+    runMatch();
+  } else {
+    renderWorkspace();
+  }
+}
+
+async function loadNamedSession(){
+  const select = document.getElementById('saved-session-select');
+  const selection = select ? select.value : '';
+  if(!selection){
+    showToast('Pick a saved bank rec first');
+    return;
+  }
+  if(selection.startsWith('cloud:')){
+    const id=selection.slice(6);
+    const {data,error}=await bankRecSb.from('bank_reconciliations').select('*').eq('id',id).single();
+    if(error){showToast(`Could not load saved bank rec: ${error.message}`);return;}
+    currentCloudSessionId=data.id;
+    currentSavedSessionName=data.name;
+    document.getElementById('cloud-property').value=data.property_code||'';
+    document.getElementById('cloud-month').value=String(data.reporting_month||'').slice(0,7);
+    const savedAccountContext={propertyCode:data.property_code||'',reportingMonth:String(data.reporting_month||'').slice(0,7),bankAccountLabel:data.bank_account_label||'',bankAccountLast4:data.bank_account_last4||''};
+    await loadBankRecAccountOptions(data.property_code||'',savedAccountContext);
+    applyCloudContext(savedAccountContext);
+    await loadCloudRules(data.property_code||'');
+    applySessionPayload(data.workspace||{},data.name);
+    setCloudState(`Saved bank rec loaded · ${new Date(data.updated_at).toLocaleString()}`,'ready');
+    showToast('Saved bank rec loaded');
+    return;
+  }
+  const name=selection.replace(/^local:/,'');
+  const saved = getSavedSessionsMap();
+  if(!saved[name]?.payload){
+    showToast('Saved bank rec not found');
+    populateSavedSessionsSelect();
+    return;
+  }
+  applySessionPayload(saved[name].payload, name);
+  showToast('Saved bank rec loaded');
+}
+
+async function deleteNamedSession(){
+  const select = document.getElementById('saved-session-select');
+  const selection = select ? select.value : '';
+  if(!selection){
+    showToast('Pick a saved bank rec first');
+    return;
+  }
+  if(selection.startsWith('cloud:')){
+    const row=bankRecCloudSessions.find(item=>item.id===selection.slice(6));
+    if(!window.confirm(`Delete the saved bank rec “${row?.name||'selected reconciliation'}”?\n\nIts scratch sheet and all reconciliation work will also be deleted. This cannot be undone.`))return;
+    const {error}=await bankRecSb.from('bank_reconciliations').delete().eq('id',selection.slice(6));
+    if(error){showToast(`Delete failed: ${error.message}`);return;}
+    const deletingActive=currentCloudSessionId===selection.slice(6);
+    if(deletingActive)clearAll('Saved Bank Rec and scratch sheet deleted');
+    await loadCloudSessionList();
+    if(!deletingActive)showToast('Saved Bank Rec and scratch sheet deleted');
+    return;
+  }
+  const name=selection.replace(/^local:/,'');
+  const saved = getSavedSessionsMap();
+  if(!saved[name]) return;
+  if(!window.confirm(`Delete the saved Bank Rec “${name}”?\n\nIts scratch sheet and all reconciliation work will also be deleted.`))return;
+  delete saved[name];
+  setSavedSessionsMap(saved);
+  if(currentSavedSessionName===name&&!currentCloudSessionId)clearAll('Saved Bank Rec and scratch sheet deleted');
+  populateSavedSessionsSelect();
+  showToast('Saved Bank Rec and scratch sheet deleted');
+}
+
+function queueCloudAutosave(){
+  if(!bankRecCloudReady||!currentCloudSessionId||cloudAutosaveBusy)return;
+  clearTimeout(cloudAutosaveTimer);
+  cloudAutosaveTimer=setTimeout(autosaveCloudSession,1200);
+}
+
+async function autosaveCloudSession(){
+  if(!bankRecCloudReady||!currentCloudSessionId||cloudAutosaveBusy)return false;
+  cloudAutosaveBusy=true;
+  try{
+    const {data:{user}}=await bankRecSb.auth.getUser();
+    const {error}=await bankRecSb.from('bank_reconciliations').update({workspace:buildSessionPayload(false),summary:results.length?calculateSummary():{},updated_by:user.id,updated_at:new Date().toISOString()}).eq('id',currentCloudSessionId);
+    if(error)throw error;
+    setCloudState(`Autosaved · ${new Date().toLocaleTimeString([],{hour:'numeric',minute:'2-digit'})}`,'ready');
+    return true;
+  }catch(error){setCloudState(`Autosave failed · ${error.message}`,'error');return false;}
+  finally{cloudAutosaveBusy=false;}
+}
+
+async function flushCloudAutosave(){
+  clearTimeout(cloudAutosaveTimer);
+  cloudAutosaveTimer=null;
+  for(let attempt=0;cloudAutosaveBusy&&attempt<40;attempt++)await new Promise(resolve=>setTimeout(resolve,100));
+  if(cloudAutosaveBusy)return false;
+  return autosaveCloudSession();
+}
+
+async function loadCloudSessionList(){
+  if(!bankRecCloudReady)return;
+  const {data,error}=await bankRecSb.from('bank_reconciliations').select('id,property_code,name,reporting_month,bank_account_label,bank_account_last4,status,updated_at').in('status',['draft','in_review']).order('updated_at',{ascending:false});
+  if(error)throw error;
+  bankRecCloudSessions=data||[];
+  populateSavedSessionsSelect();
+}
+
+async function loadCloudRules(propertyCode=''){
+  if(!bankRecCloudReady)return;
+  let query=bankRecSb.from('bank_reconciliation_rules').select('id,property_code,canonical_vendor,rule_type,match_keywords,book_source,gl_account,gl_description,match_window_days,priority,settings').eq('active',true).order('priority',{ascending:true});
+  query=propertyCode?query.or(`property_code.is.null,property_code.eq.${propertyCode}`):query.is('property_code',null);
+  const {data,error}=await query;
+  if(error)throw error;
+  bankRecCloudRules=(data||[]).sort((a,b)=>{
+    const aSpecific=a.property_code?0:1,bSpecific=b.property_code?0:1;
+    return aSpecific-bSpecific||Number(a.priority||100)-Number(b.priority||100);
+  });
+}
+
+async function initBankRecCloud(){
+  const month=document.getElementById('cloud-month');
+  if(month&&!month.value)month.value=new Date().toISOString().slice(0,7);
+  restoreSessionState();
+  try{
+    bankRecSb=window.supabase.createClient(BANK_REC_SUPABASE_URL,BANK_REC_SUPABASE_ANON_KEY,{});
+    const {data:{session}}=await bankRecSb.auth.getSession();
+    if(!session?.user){setCloudState('Demo session unavailable.','error');return;}
+    const {data:profile,error:profileError}=await bankRecSb.from('users').select('full_name,role').eq('auth_user_id',session.user.id).maybeSingle();
+    if(profileError)throw profileError;
+    if(profile?.role!=='accountant'){setCloudState('Bank reconciliation is available to accountants only.','error');return;}
+    const {data:properties,error:propertyError}=await bankRecSb.from('properties').select('code,name').order('code');
+    if(propertyError)throw propertyError;
+    const propertySelect=document.getElementById('cloud-property');
+    propertySelect.innerHTML='<option value="">Choose property...</option>'+(properties||[]).map(row=>`<option value="${escapeHtml(row.code)}">${escapeHtml(row.code)} · ${escapeHtml(row.name)}</option>`).join('');
+    const restoredContext=pendingCloudContext;
+    applyCloudContext(restoredContext);
+    pendingCloudContext=null;
+    bankRecCloudReady=true;
+    await loadBankRecAccountOptions(propertySelect.value||'',restoredContext);
+    setCloudState(`Connected as ${profile.full_name||'accountant'} · use Save once to start autosave`,'ready');
+    await loadCloudRules(propertySelect.value||'');
+    await loadCloudSessionList();
+  }catch(error){console.error('Bank rec cloud initialization failed',error);setCloudState(`Workspace unavailable · ${error.message}`,'error');}
+}
+
+function restoreSessionState(){
+  try{
+    let raw = localStorage.getItem(SESSION_KEY);
+    if(!raw){
+      for(const legacyKey of LEGACY_SESSION_KEYS){
+        raw = localStorage.getItem(legacyKey);
+        if(raw){
+          localStorage.setItem(SESSION_KEY, raw);
+          break;
+        }
+      }
+    }
+    if(!raw){
+      populateSavedSessionsSelect();
+      return;
+    }
+    const saved = JSON.parse(raw);
+    bankData = Array.isArray(saved.bankData) ? saved.bankData : [];
+    gjData = Array.isArray(saved.gjData) ? saved.gjData : [];
+    checkData = Array.isArray(saved.checkData) ? saved.checkData : [];
+    depositData = Array.isArray(saved.depositData) ? saved.depositData : [];
+    coaData = Array.isArray(saved.coaData) ? saved.coaData : [];
+    accountCatalog = buildAccountCatalog(coaData);
+    currentFilter = saved.currentFilter || 'all';
+    if(['reviewed','resolved-other'].includes(currentFilter)) currentFilter = 'all';
+    currentTab = saved.currentTab || 'expenses';
+    fileMappings = saved.fileMappings || {bank:null, gj:null, checks:null, deposits:null, coa:null};
+    currentSort = saved.currentSort || {field:'date', direction:'desc'};
+    collapsedGroups = new Set(Array.isArray(saved.collapsedGroups) ? saved.collapsedGroups : []);
+    reviewedPairIds = new Set(Array.isArray(saved.reviewedPairIds) ? saved.reviewedPairIds : []);
+    pairResolutions = saved.pairResolutions && typeof saved.pairResolutions === 'object' && !Array.isArray(saved.pairResolutions) ? {...saved.pairResolutions} : {};
+    journalEntryOverrides = saved.journalEntryOverrides && typeof saved.journalEntryOverrides === 'object' && !Array.isArray(saved.journalEntryOverrides) ? {...saved.journalEntryOverrides} : {};
+    currentSavedSessionName = saved.currentSavedSessionName || '';
+    sourceFileNames = saved.sourceFileNames || {bank:'', gj:'', checks:'', deposits:'', coa:''};
+    pendingCloudContext = saved.cloudContext || {reportingMonth:inferReportingMonth()};
+    applyCloudContext(pendingCloudContext);
+    const search = document.getElementById('search-input');
+    if(search) search.value = saved.searchValue || '';
+
+    [['bank', bankData], ['gj', gjData], ['checks', checkData], ['deposits', depositData]].forEach(([type, rows]) => {
+      if(rows.length){
+        setStatus(type, sourceStatusText(type, rows.length), 'ok');
+        if(!fileMappings[type]) fileMappings[type] = detectMappings(rows, type);
+        renderMappingPreview(type);
+      }
+    });
+    if(coaData.length){
+      setStatus('coa', sourceStatusText('coa', Object.keys(accountCatalog).length, 'accounts'), 'ok');
+      if(!fileMappings.coa) fileMappings.coa = detectMappings(coaData, 'coa');
+      renderMappingPreview('coa');
+    }
+
+    checkRunReady();
+    if(bankData.length){
+      runMatch();
+      showToast('Restored last session');
+    } else {
+      renderWorkspace();
+    }
+  } catch (err){
+    console.warn('Unable to restore session', err);
+  } finally {
+    populateSavedSessionsSelect();
+  }
+}
+
+function parseCSV(text){
+  const cleaned = String(text || '').replace(/^\uFEFF/, '').trim();
+  if(!cleaned) return [];
+  const rows = [];
+  let row = [];
+  let cell = '';
+  let inQuotes = false;
+  for(let i=0;i<cleaned.length;i++){
+    const ch = cleaned[i];
+    const next = cleaned[i+1];
+    if(ch === '"'){
+      if(inQuotes && next === '"'){ cell += '"'; i++; }
+      else inQuotes = !inQuotes;
+    } else if(ch === ',' && !inQuotes){
+      row.push(cell); cell = '';
+    } else if((ch === '\n' || ch === '\r') && !inQuotes){
+      if(ch === '\r' && next === '\n') i++;
+      row.push(cell); rows.push(row); row = []; cell = '';
+    } else {
+      cell += ch;
+    }
+  }
+  row.push(cell); rows.push(row);
+  if(rows.length < 2) return [];
+  const headers = rows[0].map(v => (v || '').trim());
+  return rows.slice(1).map(vals => {
+    const obj = {};
+    headers.forEach((h,i) => obj[h] = (vals[i] || '').trim());
+    return obj;
+  }).filter(r => Object.values(r).some(Boolean));
+}
+
+function parseTabDelimited(text){
+  const cleaned = String(text || '').replace(/^\uFEFF/, '').trim();
+  if(!cleaned) return [];
+  const lines = cleaned.split(/\r?\n/);
+  if(lines.length < 2) return [];
+  const headers = lines[0].split('\t').map(v => v.trim());
+  return lines.slice(1).map(line => {
+    const vals = line.split('\t');
+    const obj = {};
+    headers.forEach((h,i) => obj[h] = (vals[i] || '').trim());
+    return obj;
+  }).filter(r => Object.values(r).some(Boolean));
+}
+
+function parseAmount(v){
+  if(typeof v === 'number') return Number.isFinite(v) ? v : 0;
+  const s = String(v ?? '').replace(/[$,]/g,'').trim();
+  if(!s) return 0;
+  const n = Number(s);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function normalizeAccountKey(value){
+  return String(value || '').replace(/[^0-9]/g,'');
+}
+
+function parseDate(v){
+  if(!v) return null;
+  if(v instanceof Date) return v;
+  if(typeof v === 'number' && Number.isFinite(v) && v > 20000 && v < 100000){
+    const excelEpoch = new Date(Date.UTC(1899, 11, 30));
+    return new Date(excelEpoch.getTime() + v * 86400000);
+  }
+  const raw = String(v).trim();
+  const direct = new Date(raw);
+  if(!Number.isNaN(direct.getTime())) return direct;
+  const m = raw.match(/^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{2,4})$/);
+  if(!m) return null;
+  let year = Number(m[3]);
+  if(year < 100) year += 2000;
+  return new Date(year, Number(m[1]) - 1, Number(m[2]));
+}
+
+function formatDate(v){
+  const d = v instanceof Date ? v : parseDate(v);
+  if(!d || Number.isNaN(d.getTime())) return String(v || '');
+  return `${String(d.getMonth()+1).padStart(2,'0')}/${String(d.getDate()).padStart(2,'0')}/${String(d.getFullYear()).slice(2)}`;
+}
+
+function dayDiff(a,b){
+  if(!a || !b) return 999;
+  const aa = new Date(a); aa.setHours(0,0,0,0);
+  const bb = new Date(b); bb.setHours(0,0,0,0);
+  return Math.round(Math.abs(aa - bb) / 86400000);
+}
+
+function normalizeText(value){
+  return String(value || '')
+    .toUpperCase()
+    .replace(/["']/g,'')
+    .replace(/[^A-Z0-9 ]+/g,' ')
+    .replace(/\b(ACH|CCD|PPD|POS|PMT|PAYMENT|ONLINE|SETTLEMENT|CHECKCARD|DEBIT|CREDIT|TRACE|DESC|ID|REF)\b/g,' ')
+    .replace(/\s+/g,' ')
+    .trim();
+}
+
+function normalizeHeader(value){
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g,' ')
+    .trim();
+}
+
+function buildAccountCatalog(rows){
+  const catalog = {};
+  rows.forEach(row => {
+    const acct = normalizeAccountKey(getFieldValue(row, ['account','account no','acct','gl account']));
+    if(!acct) return;
+    const description = String(getFieldValue(row, ['description','account description','name'])).trim();
+    const abbreviation = String(getFieldValue(row, ['abbreviation','abbr','short description'])).trim();
+    catalog[acct] = {
+      account:acct,
+      description:description || abbreviation || acct,
+      abbreviation:abbreviation || description || acct
+    };
+  });
+  return catalog;
+}
+
+function getAccountDescription(acct, fallback){
+  const key = normalizeAccountKey(acct);
+  if(key && accountCatalog[key] && accountCatalog[key].description) return accountCatalog[key].description;
+  return fallback || '';
+}
+
+function detectMappings(rows, type){
+  const first = rows && rows[0] ? rows[0] : null;
+  if(!first) return null;
+  if(type === 'coa'){
+    return {
+      account: detectFieldName(first, ['account','account no','acct','gl account']),
+      description: detectFieldName(first, ['description','account description','name']),
+      abbreviation: detectFieldName(first, ['abbreviation','abbr','short description']),
+      group: detectFieldName(first, ['group','type']),
+      disabled: detectFieldName(first, ['disabled','inactive'])
+    };
+  }
+  return {
+    date: detectFieldName(first, ['date','trans date','transaction date','entry date','post date']),
+    amount: detectFieldName(first, ['amount','net amount','amt','value','debit','credit','payment','withdrawal','deposit']),
+    vendor: detectFieldName(first, ['subsidiary','vendor','vendor name','payee','customer']),
+    reference: detectFieldName(first, ['source','reference','voucher','voucher no','ref no','number','check no','check number']),
+    description: detectFieldName(first, ['description','transaction detail','memo','details','comment','account description'])
+  };
+}
+
+function detectFieldName(row, aliases){
+  for(const key of Object.keys(row || {})){
+    const norm = normalizeHeader(key);
+    if(aliases.some(alias => norm === alias || norm.includes(alias))) return key;
+  }
+  return '';
+}
+
+function getFieldValue(row, aliases){
+  if(!row) return '';
+  const entries = Object.entries(row);
+  for(const [key, value] of entries){
+    const norm = normalizeHeader(key);
+    if(aliases.some(alias => norm === alias || norm.includes(alias))){
+      if(String(value || '').trim() !== '') return value;
+    }
+  }
+  return '';
+}
+
+function escapeHtml(value){
+  return String(value || '')
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;')
+    .replace(/'/g,'&#39;');
+}
+
+function getSignedAmount(row){
+  const amount = parseAmount(getFieldValue(row, ['amount','net amount','amt','value']));
+  const debit = parseAmount(getFieldValue(row, ['debit','debit amount','payment','withdrawal']));
+  const credit = parseAmount(getFieldValue(row, ['credit','credit amount','deposit']));
+  if(debit || credit){
+    if(credit && !debit) return credit;
+    if(debit && !credit) return -debit;
+    return credit - debit;
+  }
+  return amount;
+}
+
+function getAlias(text){
+  const norm = normalizeText(text);
+  const merchantFocus = norm
+    .replace(/\bMAPLE COURT\b/g,' ')
+    .replace(/\b[0-9]{2,}.*$/,' ')
+    .replace(/\s+/g,' ')
+    .trim();
+
+  if(merchantFocus.includes('INSURANCE REFUND')){
+    return getVendorRule('INSURANCE REFUND');
+  }
+  if(merchantFocus.includes('RENT PORTAL')){
+    return getVendorRule('RENT PORTAL');
+  }
+
+  for(const vendor of effectiveVendorMap()){
+    if(vendor.canonical === 'INSURANCE REFUND' || vendor.canonical === 'RENT PORTAL') continue;
+    for(const keyword of vendor.keywords){
+      const key = normalizeText(keyword);
+      if(merchantFocus.includes(key) || norm.startsWith(key)) return vendor;
+    }
+  }
+  return null;
+}
+
+function getVendorRule(canonical){
+  return effectiveVendorMap().find(v => v.canonical === canonical) || null;
+}
+
+function effectiveVendorMap(){
+  const custom=bankRecCloudRules.map(row=>({canonical:row.canonical_vendor,type:row.settings?.transaction_type||'journal',glAcct:row.gl_account||'',glDesc:row.gl_description||'',keywords:Array.isArray(row.match_keywords)?row.match_keywords:[],bookSource:row.book_source,matchWindowDays:row.match_window_days,ruleId:row.id,propertyCode:row.property_code||''}));
+  const overridden=new Set(custom.map(row=>row.canonical));
+  return custom.concat(VENDOR_MAP.filter(row=>!overridden.has(row.canonical)));
+}
+
+function getPayrollComponent(tx){
+  const text = normalizeText(`${tx.detail || ''} ${tx.description || ''}`);
+  if(text.includes('TAX IMPND') || text.includes('PAYROLL TAX') || text.includes('ADP TAX')){
+    return {label:'PAYROLL TAX', acct:'60120', desc:getAccountDescription('60120','Payroll Taxe'), order:2, keywords:['PAYROLL TAX','TAX IMPND','ADP TAX']};
+  }
+  if(text.includes('BILL IMPND') || text.includes('PAYROLL FEE') || text.includes('ADP FEES') || text.includes('PAYROLL FEES')){
+    return {label:'PAYROLL FEE', acct:'60155', desc:getAccountDescription('60155','Payroll Fee'), order:3, keywords:['PAYROLL FEE','BILL IMPND','ADP FEES','PAYROLL FEES']};
+  }
+  if(text.includes('WORKERS COMP') || text.includes('PAY BY PAY')){
+    return {label:'WORKERS COMP', acct:'60185', desc:getAccountDescription('60185','Workers Comp'), order:4, keywords:['WORKERS COMP','WC','PAY BY PAY']};
+  }
+  if(text.includes('OWNPAYROLL') || text.includes('PAYROLL') || text.includes('WAGE PAY')){
+    return {label:'PAYROLL', acct:'60110', desc:getAccountDescription('60110','Payroll'), order:1, keywords:['PAYROLL','OWNPAYROLL','WAGE PAY']};
+  }
+  return null;
+}
+
+function rowText(row){
+  return normalizeText(Object.values(row || {}).join(' '));
+}
+
+function isPaidCheck(row){
+  return normalizeText(row['Transaction Description']).includes('PAID CHECK');
+}
+
+function isTransfer(row){
+  const desc = String(row['Transaction Description'] || '').trim().toUpperCase();
+  // Incoming maintenance sweeps and wire deposits are not internal transfers
+  if(desc === 'BOOK TRANSFER CREDIT') return false;
+  if(desc === 'WIRE TRANSFER DEPOSIT') return false;
+  const combo = normalizeText((row['Transaction Description'] || '') + ' ' + (row['Transaction Detail'] || ''));
+  return combo.includes('TRANSFER');
+}
+
+function getTransferLabel(tx){
+  const raw = String(tx && tx.detail ? tx.detail : '').replace(/\s+/g,' ').trim();
+  const upper = raw.toUpperCase();
+  if(upper.includes('STRIPE') && upper.includes('TRANSFER')) return 'STRIPE TRANSFER';
+  if(upper.includes('TRANSFER')) return raw || 'Internal Transfer';
+  return 'Internal Transfer';
+}
+
+function getCheckNo(row){
+  return String(row['Customer Reference'] || row['Check No'] || row['Check Number'] || row['CheckNo'] || '').replace(/^0+/,'');
+}
+
+function collectRows(source, kind){
+  return source.map((row,index) => {
+    const amount = getSignedAmount(row);
+    return {
+      index,
+      row,
+      kind,
+      text: rowText(row),
+      amountAbs: Math.abs(amount),
+      amountSigned: amount,
+      date: parseDate(getFieldValue(row, ['date','trans date','transaction date','entry date','post date'])),
+      checkNo: String(getFieldValue(row, ['check no','check number','checkno','chk no','check'])).replace(/^0+/,''),
+      source: String(getFieldValue(row, ['source','reference','voucher','voucher no','ref no','number'])).trim(),
+      subsidiary: String(getFieldValue(row, ['subsidiary','vendor','vendor name','payee','customer'])).trim(),
+      description: String(getFieldValue(row, ['description','transaction detail','memo','details','comment','account description'])).trim()
+    };
+  });
+}
+
+function bookKey(book){
+  return `${book.kind}:${book.index}`;
+}
+
+function buildCheckGroups(glBooks){
+  const groups = {};
+  glBooks.forEach(book => {
+    if(!book.checkNo) return;
+    if(!groups[book.checkNo]){
+      groups[book.checkNo] = {
+        kind:'gl-group',
+        checkNo:book.checkNo,
+        rows:[],
+        amountSigned:0,
+        amountAbs:0,
+        date:book.date,
+        description:book.description || '',
+        subsidiary:book.subsidiary || ''
+      };
+    }
+    const group = groups[book.checkNo];
+    group.rows.push(book);
+    group.amountSigned += book.amountSigned;
+    group.amountAbs += book.amountAbs;
+    if(book.date && (!group.date || book.date < group.date)) group.date = book.date;
+    if(!group.description && book.description) group.description = book.description;
+    if(!group.subsidiary && book.subsidiary) group.subsidiary = book.subsidiary;
+  });
+  return Object.values(groups);
+}
+
+function buildJournalGroups(gjBooks){
+  const sorted = [...gjBooks].sort((a,b) => {
+    const aDate = a.date ? a.date.getTime() : 0;
+    const bDate = b.date ? b.date.getTime() : 0;
+    return aDate - bDate || a.index - b.index;
+  });
+  const groups = [];
+  let current = null;
+
+  const pushCurrent = () => {
+    if(current && current.rows.length){
+      groups.push(current);
+      current = null;
+    }
+  };
+
+  sorted.forEach(book => {
+    const ts = book.date ? new Date(book.date).setHours(0,0,0,0) : 0;
+    if(!current || current.dateTs !== ts){
+      pushCurrent();
+      current = {id:`gj-${groups.length}`, dateTs:ts, date:book.date, rows:[], running:0};
+    }
+    current.rows.push(book);
+    current.running += book.amountSigned;
+    if(Math.abs(current.running) < 0.02 && current.rows.length > 1){
+      pushCurrent();
+    }
+  });
+  pushCurrent();
+  return groups;
+}
+
+function makeGroupedBook(group, label){
+  return {
+    kind:group.kind || 'group',
+    index:group.checkNo || group.id,
+    date:group.date,
+    checkNo:group.checkNo || '',
+    source:group.checkNo || group.id || '',
+    subsidiary:group.subsidiary || '',
+    description:group.description || '',
+    amountSigned:group.amountSigned,
+    amountAbs:Math.abs(group.amountSigned || group.amountAbs || 0),
+    label:label || group.subsidiary || group.description || 'Grouped Book Item',
+    confidence:'high'
+  };
+}
+
+function markBooksUsed(rows, used){
+  rows.forEach(book => used.add(bookKey(book)));
+}
+
+function closeJournalGroups(groups, used){
+  groups.forEach(group => {
+    const positiveRows = group.rows.filter(row => row.amountSigned > 0);
+    if(!positiveRows.length) return;
+    if(positiveRows.every(row => used.has(bookKey(row)))){
+      markBooksUsed(group.rows, used);
+    }
+  });
+}
+
+function bookMatchCandidate(bank, book, alias){
+  const days = dayDiff(bank.date, book.date);
+  if(Math.abs(bank.amountAbs - book.amountAbs) > 0.02) return null;
+  const bookText = `${book.text} ${normalizeText(book.subsidiary)} ${normalizeText(book.description)}`;
+  const isMortgageAlias = alias && ['FIRST MORTGAGE BANK','METRO SAVINGS'].includes(alias.canonical);
+  const aliasTerms = alias ? [alias.canonical].concat(alias.keywords || []) : [];
+  const aliasHit = alias && aliasTerms.some(term => {
+    const normTerm = normalizeText(term);
+    if(!normTerm) return false;
+    if(bookText.includes(normTerm)) return true;
+    if(normTerm === 'WORKERS COMP' && bookText.includes('WC')) return true;
+    if(normTerm.startsWith('UNION') && bookText.includes('UNION')) return true;
+    if(normTerm.includes('INSURANCE') && bookText.includes('INSURANCE')) return true;
+    return false;
+  });
+  const bankWords = normalizeText(bank.detail).split(' ').filter(w => w.length > 4);
+  const fuzzyHit = bankWords.some(w => bookText.includes(w));
+  if(isMortgageAlias && days <= 10) return {days, score:days};
+  if(!(aliasHit || fuzzyHit)) return null;
+  return {days, score:(aliasHit ? 0 : 10) + days};
+}
+
+function findAmountDateBook(bank, books, used, maxDays){
+  const candidates = [];
+  books.forEach(book => {
+    if(used.has(book.kind + ':' + book.index)) return;
+    if(Math.abs(bank.amountAbs - book.amountAbs) > 0.02) return;
+    const days = dayDiff(bank.date, book.date);
+    if(days > maxDays) return;
+    candidates.push({...book, days, score:days});
+  });
+  candidates.sort((a,b) => a.score - b.score);
+  return candidates[0] || null;
+}
+
+function findBestBook(bank, books, used, alias, maxDays){
+  const candidates = [];
+  books.forEach(book => {
+    if(used.has(book.kind + ':' + book.index)) return;
+    const m = bookMatchCandidate(bank, book, alias);
+    if(!m || m.days > maxDays) return;
+    candidates.push({...book, score:m.score, days:m.days});
+  });
+  candidates.sort((a,b) => a.score - b.score);
+  return candidates[0] || null;
+}
+
+function buildBankTxs(){
+  return bankData.map((row,index) => {
+    const amount = parseAmount(row['Amount']);
+    const detail = String(row['Transaction Detail'] || row['Transaction Description'] || '').trim();
+    const alias = getAlias(detail);
+    const type = amount >= 0 ? 'deposit' : 'expense';
+    return {
+      index,
+      row,
+      type,
+      amount,
+      amountAbs: Math.abs(amount),
+      date: parseDate(row['Date'] || row['Transaction Date']),
+      detail,
+      description: String(row['Transaction Description'] || '').trim(),
+      alias,
+      checkNo: getCheckNo(row)
+    };
+  }).filter(tx => Math.abs(tx.amount) > 0.0001);
+}
+
+function runMatch(){
+  if(!bankData.length) return;
+
+  const glBooks = collectRows(checkData, 'gl');
+  const gjBooks = collectRows(gjData, 'gj');
+  const depBooks = collectRows(depositData, 'dep');
+  const checkGroups = buildCheckGroups(glBooks);
+  const journalGroups = buildJournalGroups(gjBooks);
+  const managementRule = getVendorRule('MANAGING AGENT');
+  const used = new Set();
+
+  results = buildBankTxs().map(tx => {
+    let status = 'review';
+    let confidence = 'low';
+    let label = tx.alias ? tx.alias.canonical : 'Unknown';
+    let glAcct = tx.alias ? tx.alias.glAcct : '';
+    let glDesc = tx.alias ? getAccountDescription(tx.alias.glAcct, tx.alias.glDesc) : '';
+    let book = null;
+    const payrollComponent = tx.type === 'expense' ? getPayrollComponent(tx) : null;
+
+    if(isTransfer(tx.row)){
+      const managementBook = managementRule ? findBestBook(tx, glBooks, used, managementRule, 10) : null;
+      if(managementBook){
+        used.add(bookKey(managementBook));
+        book = managementBook;
+        status = 'matched';
+        confidence = managementBook.days <= 4 ? 'high' : 'medium';
+        label = managementRule.canonical;
+        glAcct = managementRule.glAcct;
+        glDesc = getAccountDescription(managementRule.glAcct, managementRule.glDesc);
+      } else {
+        status = 'needs-journal';
+        confidence = 'medium';
+        label = getTransferLabel(tx);
+        if(label === 'STRIPE TRANSFER'){
+          glAcct = '46000';
+          glDesc = getAccountDescription('46000','Application');
+        } else {
+          glAcct = '';
+          glDesc = '';
+        }
+      }
+    } else if(isPaidCheck(tx.row)){
+      const checkBook = checkGroups.find(group => group.checkNo === tx.checkNo && !group.rows.some(row => used.has(bookKey(row))));
+      label = tx.checkNo ? `Check #${tx.checkNo}` : 'Check';
+      glAcct = '10010';
+        glDesc = getAccountDescription('10010','Operating');
+      if(checkBook){
+        markBooksUsed(checkBook.rows, used);
+        book = makeGroupedBook(checkBook, label);
+        status = 'matched';
+        confidence = 'high';
+      } else {
+        status = 'review';
+        confidence = 'medium';
+      }
+    } else if(tx.type === 'deposit'){
+      const depositWindow = tx.alias && (tx.alias.canonical === 'RENT PORTAL' || tx.alias.canonical === 'INSURANCE REFUND') ? 7 : 4;
+      const depositBook = findAmountDateBook(tx, depBooks, used, depositWindow);
+      if(depositBook){
+        used.add(depositBook.kind + ':' + depositBook.index);
+        book = depositBook;
+        status = 'matched';
+        confidence = depositBook.days <= 2 ? 'high' : 'medium';
+      } else {
+        status = 'income';
+      }
+    } else if(payrollComponent){
+      label = payrollComponent.label;
+      glAcct = payrollComponent.acct;
+      glDesc = getAccountDescription(payrollComponent.acct, payrollComponent.desc);
+      const found = findBestBook(tx, gjBooks, used, {canonical:payrollComponent.label}, 7);
+      if(found){
+        used.add(found.kind + ':' + found.index);
+        book = found;
+        status = 'matched';
+        confidence = found.days <= 3 ? 'high' : 'medium';
+      } else {
+        status = 'needs-journal';
+      }
+    } else if(tx.alias && tx.alias.canonical === 'NYC DOF'){
+      const uploaded = findBestBook(tx, glBooks, used, tx.alias, 10);
+      if(uploaded){
+        used.add(uploaded.kind + ':' + uploaded.index);
+        book = uploaded;
+        status = 'matched';
+        confidence = uploaded.days <= 4 ? 'high' : 'medium';
+      } else {
+        const journaled = findBestBook(tx, gjBooks, used, tx.alias, 10);
+        if(journaled){
+          used.add(journaled.kind + ':' + journaled.index);
+          book = journaled;
+          status = 'matched';
+          confidence = journaled.days <= 4 ? 'high' : 'medium';
+        } else {
+          status = 'needs-journal';
+        }
+      }
+    } else if(tx.alias && (tx.alias.canonical === 'VERIZON' || tx.alias.canonical === 'SPECTRUM')){
+      const uploaded = findBestBook(tx, glBooks, used, tx.alias, 10);
+      if(uploaded){
+        used.add(uploaded.kind + ':' + uploaded.index);
+        book = uploaded;
+        status = 'matched';
+        confidence = uploaded.days <= 4 ? 'high' : 'medium';
+      } else {
+        const journaled = findBestBook(tx, gjBooks, used, tx.alias, 10);
+        if(journaled){
+          used.add(journaled.kind + ':' + journaled.index);
+          book = journaled;
+          status = 'matched';
+          confidence = journaled.days <= 4 ? 'high' : 'medium';
+        } else {
+          status = 'needs-journal';
+        }
+      }
+    } else if(tx.alias && tx.alias.canonical === 'HEALTH PLAN ADMIN'){
+      const uploaded = findBestBook(tx, glBooks, used, tx.alias, 10);
+      if(uploaded){
+        used.add(uploaded.kind + ':' + uploaded.index);
+        book = uploaded;
+        status = 'matched';
+        confidence = uploaded.days <= 4 ? 'high' : 'medium';
+      } else {
+        const journaled = findBestBook(tx, gjBooks, used, tx.alias, 10);
+        if(journaled){
+          used.add(journaled.kind + ':' + journaled.index);
+          book = journaled;
+          status = 'matched';
+          confidence = journaled.days <= 4 ? 'high' : 'medium';
+        } else {
+          status = 'needs-journal';
+          glAcct = '60175';
+          glDesc = getAccountDescription('60175', 'Health Insurance');
+        }
+      }
+    } else if(tx.alias && (tx.alias.canonical === 'PRIMO BRANDS' || tx.alias.canonical === 'PAYPAL' || tx.alias.canonical === 'EQUIP FINANCING')){
+      const uploaded = findBestBook(tx, glBooks, used, tx.alias, 10);
+      if(uploaded){
+        used.add(uploaded.kind + ':' + uploaded.index);
+        book = uploaded;
+        status = 'matched';
+        confidence = uploaded.days <= 4 ? 'high' : 'medium';
+      } else {
+        const journaled = findBestBook(tx, gjBooks, used, tx.alias, 10);
+        if(journaled){
+          used.add(journaled.kind + ':' + journaled.index);
+          book = journaled;
+          status = 'matched';
+          confidence = journaled.days <= 4 ? 'high' : 'medium';
+        } else {
+          status = 'needs-journal';
+          if(tx.alias.canonical === 'PRIMO BRANDS'){
+            glAcct = '63070';
+            glDesc = getAccountDescription('63070', 'Office Equipment');
+          } else if(tx.alias.canonical === 'EQUIP FINANCING'){
+            glAcct = '63045';
+            glDesc = getAccountDescription('63045', 'Equipment Lease');
+          } else {
+            glAcct = '63080';
+            glDesc = getAccountDescription('63080', 'Bank Charge');
+          }
+        }
+      }
+    } else if(tx.alias && (tx.alias.canonical === 'UNITED HEALTH CARE' || tx.alias.canonical === 'DENTAL PLAN')){
+      const uploaded = findBestBook(tx, glBooks, used, tx.alias, 10);
+      if(uploaded){
+        used.add(uploaded.kind + ':' + uploaded.index);
+        book = uploaded;
+        status = 'matched';
+        confidence = uploaded.days <= 4 ? 'high' : 'medium';
+      } else {
+        const journaled = findBestBook(tx, gjBooks, used, tx.alias, 10);
+        if(journaled){
+          used.add(journaled.kind + ':' + journaled.index);
+          book = journaled;
+          status = 'matched';
+          confidence = journaled.days <= 4 ? 'high' : 'medium';
+        } else {
+          status = 'needs-journal';
+          glAcct = '60175';
+          glDesc = getAccountDescription('60175', 'Health Insurance');
+        }
+      }
+    } else if(tx.alias && tx.alias.type === 'invoice'){
+      const invoiceWindow = ['FIRST MORTGAGE BANK','METRO SAVINGS'].includes(tx.alias.canonical) ? 20 : 10;
+      const found = findBestBook(tx, glBooks, used, tx.alias, invoiceWindow);
+      if(found){
+        used.add(found.kind + ':' + found.index);
+        book = found;
+        status = 'matched';
+        confidence = found.days <= 4 ? 'high' : 'medium';
+      } else {
+        const balanceOnly = findAmountDateBook(tx, glBooks, used, invoiceWindow);
+        if(balanceOnly){
+          used.add(balanceOnly.kind + ':' + balanceOnly.index);
+          book = balanceOnly;
+          status = 'balance-match';
+          confidence = 'medium';
+        } else {
+          status = tx.alias.canonical === 'SPECTRUM' || tx.alias.canonical === 'NYC DOB' || tx.alias.canonical === 'HOME DEPOT' ? 'review' : 'review';
+        }
+      }
+    } else if(tx.alias && tx.alias.type === 'journal'){
+      const found = findBestBook(tx, gjBooks, used, tx.alias, 7);
+      if(found){
+        used.add(found.kind + ':' + found.index);
+        book = found;
+        status = 'matched';
+        confidence = found.days <= 3 ? 'high' : 'medium';
+      } else {
+        status = 'needs-journal';
+      }
+    } else {
+      const fallback = findBestBook(tx, [...glBooks, ...gjBooks], used, tx.alias, 5);
+      if(fallback){
+        used.add(fallback.kind + ':' + fallback.index);
+        book = fallback;
+        status = 'matched';
+        confidence = 'medium';
+      } else {
+        const balanceOnly = findAmountDateBook(tx, [...glBooks, ...gjBooks, ...depBooks], used, 4);
+        if(balanceOnly){
+          used.add(balanceOnly.kind + ':' + balanceOnly.index);
+          book = balanceOnly;
+          status = 'balance-match';
+          confidence = 'medium';
+        }
+      }
+    }
+
+    return {tx, book, status, confidence, label, glAcct, glDesc};
+  });
+
+  closeJournalGroups(journalGroups, used);
+  expensePairs = buildPairs('expense', used, glBooks, gjBooks);
+  depositPairs = buildPairs('deposit', used, depBooks, []);
+  generateJournalEntries();
+  updateSideStats();
+  saveSessionState(true);
+  checkRunReady();
+  renderWorkspace();
+  showToast('Matching finished');
+}
+
+function buildPairs(type, used, primaryBooks, extraBooks){
+  const matched = results.filter(r => r.tx.type === type);
+  const pairs = matched.map(r => ({
+    id: `pair-bank-${r.tx.index}`,
+    bank:r,
+    book:r.book ? decorateBookStandalone(r.book, r) : null
+  }));
+
+  [...primaryBooks, ...extraBooks].forEach(book => {
+    const key = book.kind + ':' + book.index;
+    if(used.has(key)) return;
+    const standaloneType = type === 'deposit' ? (book.amountSigned >= 0 ? 'deposit' : 'expense') : 'expense';
+    if(standaloneType !== type) return;
+    pairs.push({
+      id: `pair-book-${book.kind}-${book.index}`,
+      bank:null,
+      book:decorateBookStandalone(book, null)
+    });
+  });
+  return pairs;
+}
+
+function isReviewableStatus(status){
+  return ['review','balance-match','needs-journal','income'].includes(status);
+}
+
+function actualBookSource(pair){
+  const kind=String(pair?.book?.kind||'').toLowerCase();
+  if(kind==='gl'||kind==='gl-group')return'cd';
+  if(kind==='gj'||kind==='gj-group')return'gj';
+  if(kind==='dep')return'cr';
+  return'';
+}
+
+function expectedBookSource(pair){
+  const actual=actualBookSource(pair);if(actual)return actual;
+  const bank=pair?.bank;if(!bank)return'';
+  if(bank.tx?.type==='deposit'||bank.status==='income')return'cr';
+  if(isPaidCheck(bank.tx?.row||{}))return'cd';
+  if(bank.tx?.alias?.type==='invoice')return'cd';
+  if(bank.tx?.alias?.type==='journal'||bank.status==='needs-journal')return'gj';
+  return'';
+}
+
+function getPairResolution(pair){
+  const saved=String(pairResolutions[pair?.id]||'');
+  if(['cd','gj','cr'].includes(saved))return saved;
+  if(pair?.id&&reviewedPairIds.has(pair.id)&&pair?.bank?.status==='needs-journal')return'gj';
+  return'';
+}
+
+function isDepositPair(pair){
+  return pair?.bank?.tx?.type === 'deposit' || pair?.bank?.status === 'income' || actualBookSource(pair) === 'cr';
+}
+
+function resolutionControl(pair){
+  if(!pair?.bank||getPairStatus(pair)==='matched')return'';
+  const selected=getPairResolution(pair);
+  const button=(value,label)=>`<button type="button" class="resolution-btn ${value} ${selected===value?'active':''}" data-pair-id="${escapeHtml(pair.id)}" data-value="${value}" onclick="togglePairResolution(this.dataset.pairId,this.dataset.value)" aria-pressed="${selected===value?'true':'false'}">${label}</button>`;
+  const sourceButtons=isDepositPair(pair)
+    ? `${button('cr','CR Clear')}${button('gj','GJ Journal')}`
+    : `${button('cd','CD Upload')}${button('gj','GJ Journal')}`;
+  return `<div class="resolution-control"><label>Resolve as</label><div class="resolution-actions">${sourceButtons}</div></div>`;
+}
+
+function decorateBookStandalone(book, bankResult){
+  let status = 'outstanding';
+  let confidence = '';
+  let label = book.subsidiary || book.description || book.source || 'Book Item';
+  if(bankResult){
+    status = bankResult.status;
+    confidence = bankResult.confidence;
+    label = bankResult.label;
+  } else if(book.kind === 'dep'){
+    status = 'outstanding';
+  } else if(book.checkNo || book.kind === 'gl'){
+    status = 'outstanding';
+  } else if(book.kind === 'gj'){
+    status = 'review';
+  }
+  return {...book, status, confidence, label};
+}
+
+function getPairStatus(pair){
+  const base = pair.bank ? pair.bank.status : (pair.book ? pair.book.status : '');
+  if(pair.bank&&pair.book&&base==='matched')return'matched';
+  const resolution=getPairResolution(pair);
+  if(resolution==='cd')return'resolved-cd';
+  if(resolution==='gj')return'resolved-gj';
+  if(resolution==='cr')return'resolved-cr';
+  return base;
+}
+
+function captureScrollState(){
+  const panes = document.querySelectorAll('.split-grid .pane-body');
+  return {
+    windowY: window.scrollY || window.pageYOffset || 0,
+    bankPane: panes[0]?.scrollTop || 0,
+    bookPane: panes[1]?.scrollTop || 0
+  };
+}
+
+function restoreScrollState(state){
+  if(!state) return;
+  requestAnimationFrame(() => {
+    window.scrollTo(0, state.windowY || 0);
+    const panes = document.querySelectorAll('.split-grid .pane-body');
+    const bankPane = panes[0];
+    const bookPane = panes[1];
+    if(bankPane) bankPane.scrollTop = state.bankPane || 0;
+    if(bookPane) bookPane.scrollTop = state.bookPane || 0;
+  });
+}
+
+function setPairResolution(pairId,value){
+  const scrollState = captureScrollState();
+  reviewedPairIds.delete(pairId);
+  if(value)pairResolutions[pairId]=value;else delete pairResolutions[pairId];
+  generateJournalEntries();
+  updateSideStats();
+  saveSessionState(true);
+  renderWorkspace();
+  restoreScrollState(scrollState);
+}
+
+function togglePairResolution(pairId,value){
+  setPairResolution(pairId,getPairResolution({id:pairId})===value?'':value);
+}
+
+function toggleReviewed(pairId,checked){setPairResolution(pairId,checked?'reviewed':'');}
+
+function generateJournalEntries(){
+  const allPairs=[...expensePairs,...depositPairs];
+  const excludedBankIndexes=new Set(allPairs.filter(pair=>['cd','cr'].includes(getPairResolution(pair))).map(pair=>pair.bank?.tx?.index).filter(index=>index!=null));
+  const recordedBankIndexes=new Set(allPairs.filter(pair=>getPairResolution(pair)==='gj').map(pair=>pair.bank?.tx?.index).filter(index=>index!=null));
+  const manualItems = results.filter(r => (r.status === 'needs-journal'||recordedBankIndexes.has(r.tx.index))&&!excludedBankIndexes.has(r.tx.index));
+  const payrollItems = manualItems.filter(r => getPayrollComponent(r.tx));
+  const otherItems = manualItems.filter(r => !getPayrollComponent(r.tx));
+  const markGroupState=group=>{
+    const indexes=Array.isArray(group.sourceIndexes)?group.sourceIndexes:[];
+    const recorded=indexes.filter(index=>recordedBankIndexes.has(index)).length;
+    return {...group,recordingState:recorded&&recorded===indexes.length?'recorded':recorded?'partial':'pending'};
+  };
+  const payrollGroups = buildPayrollJournalGroups(payrollItems).map(markGroupState);
+
+  const otherGroups = Object.entries(otherItems.reduce((groups, r) => {
+    const rawLabel = r.label && r.label !== 'Unknown' ? r.label : (r.tx.detail || r.tx.description || 'Unclassified transaction');
+    const key = String(rawLabel).trim().slice(0,120) || 'Unclassified transaction';
+    if(!groups[key]) groups[key] = [];
+    groups[key].push(r);
+    return groups;
+  }, {})).map(([vendor, items]) => ({
+    vendor,
+    sourceIndexes:items.map(item=>item.tx.index).filter(index=>index!=null),
+    entries: items.sort((a,b)=>(a.tx.date||0)-(b.tx.date||0)).flatMap(item => buildManualJournalPair(item, vendor))
+  })).map(markGroupState);
+
+  journalEntries = [...payrollGroups, ...otherGroups].map(group=>({
+    ...group,
+    entries:group.entries.map(applyJournalEntryOverride)
+  }));
+}
+
+function applyJournalEntryOverride(entry){
+  if(!entry.entryKey)return entry;
+  const override=journalEntryOverrides[entry.entryKey]||{};
+  return {...entry,acct:override.acct!=null?override.acct:entry.acct,desc:override.desc!=null?override.desc:entry.desc};
+}
+
+function updateJournalEntryOverride(entryKey,field,value){
+  if(!entryKey||!['acct','desc'].includes(field))return;
+  const next={...(journalEntryOverrides[entryKey]||{}),[field]:String(value||'').trim()};
+  if(field==='acct'&&!next.desc){
+    const accountDescription=getAccountDescription(next.acct,'');
+    if(accountDescription&&accountDescription!==next.acct)next.desc=accountDescription;
+  }
+  journalEntryOverrides[entryKey]=next;
+  generateJournalEntries();
+  saveSessionState(true);
+  openJournal();
+}
+
+function buildManualJournalPair(item, vendor){
+  const isTransferItem = isTransfer(item.tx.row);
+  const transferDesc = isTransferItem ? getTransferLabel(item.tx) : vendor;
+  const offsetDesc = getAccountDescription('10010','Operating');
+
+  if(isTransferItem && item.tx.amount > 0){
+    return [
+      {entryKey:`bank-${item.tx.index}-cash`,date:formatDate(item.tx.date), acct:'10010', desc:offsetDesc, amt:item.tx.amountAbs, comment:transferDesc},
+      {entryKey:`bank-${item.tx.index}-primary`,date:formatDate(item.tx.date), acct:item.glAcct || '', desc:item.glDesc || transferDesc, amt:-item.tx.amountAbs, comment:transferDesc}
+    ];
+  }
+
+  return [
+    {entryKey:`bank-${item.tx.index}-primary`,date:formatDate(item.tx.date), acct:item.glAcct || '', desc:isTransferItem ? transferDesc : getAccountDescription(item.glAcct, item.glDesc || transferDesc), amt:item.tx.amountAbs, comment:transferDesc},
+    {entryKey:`bank-${item.tx.index}-cash`,date:formatDate(item.tx.date), acct:'10010', desc:offsetDesc, amt:-item.tx.amountAbs, comment:transferDesc}
+  ];
+}
+
+function buildPayrollJournalGroups(items){
+  if(!items.length) return [];
+  const ordered = [...items].sort((a,b)=>(a.tx.date||0)-(b.tx.date||0));
+  const groups = [];
+
+  ordered.forEach(item => {
+    const component = getPayrollComponent(item.tx);
+    if(!component) return;
+    let group = null;
+    if(component.acct === '60110'){
+      group = {
+        vendor:`PAYROLL ${formatDate(item.tx.date)}`,
+        payrollDate:item.tx.date,
+        items:[]
+      };
+      groups.push(group);
+    } else {
+      group = [...groups].reverse().find(g => dayDiff(g.payrollDate, item.tx.date) <= 5);
+      if(!group){
+        group = {
+          vendor:`PAYROLL ${formatDate(item.tx.date)}`,
+          payrollDate:item.tx.date,
+          items:[]
+        };
+        groups.push(group);
+      }
+    }
+    group.items.push({...item, payrollComponent:component});
+  });
+
+  const mergedGroups = groups.reduce((acc, group, index) => {
+    const isWorkersCompOnly = group.items.length && group.items.every(item => item.payrollComponent && item.payrollComponent.acct === '60185');
+    const nextGroup = groups[index + 1];
+    const nextHasPayroll = nextGroup && nextGroup.items.some(item => item.payrollComponent && item.payrollComponent.acct === '60110');
+    if(isWorkersCompOnly && nextHasPayroll && dayDiff(group.payrollDate, nextGroup.payrollDate) <= 2){
+      nextGroup.items = [
+        ...group.items.map(item => ({...item, overrideDate: nextGroup.payrollDate})),
+        ...nextGroup.items
+      ];
+      return acc;
+    }
+    acc.push(group);
+    return acc;
+  }, []);
+
+  return mergedGroups.map(group => {
+    const sortedItems = group.items
+      .sort((a,b) => a.payrollComponent.order - b.payrollComponent.order || a.tx.amountAbs - b.tx.amountAbs);
+    const entries = sortedItems
+      .map(item => ({
+        date:formatDate(item.overrideDate || item.tx.date || group.payrollDate),
+        acct:item.payrollComponent.acct,
+        desc:item.payrollComponent.desc,
+        amt:item.tx.amountAbs,
+        comment:group.vendor
+      }));
+    const total = entries.reduce((sum, entry) => sum + entry.amt, 0);
+    const cashDate = sortedItems.reduce((latest, item) => {
+      if(!item.tx.date) return latest;
+      if(!latest || item.tx.date > latest) return item.tx.date;
+      return latest;
+    }, group.payrollDate);
+    entries.push({
+      date:formatDate(cashDate),
+      acct:'10010',
+      desc:'Operating',
+      amt:-total,
+      comment:group.vendor
+    });
+    return {vendor:group.vendor, entries, sourceIndexes:sortedItems.map(item=>item.tx.index).filter(index=>index!=null)};
+  });
+}
+
+function updateSideStats(){
+  const tabPairs = currentTab === 'expenses' ? expensePairs : depositPairs;
+  const queues = getActionQueues(tabPairs);
+  const counts = {
+    matched: tabPairs.filter(p => getPairStatus(p) === 'matched').length,
+    review: tabPairs.filter(p => ['review','balance-match'].includes(getPairStatus(p))).length,
+    resolved: queues.confirmed.length,
+    cd: queues.missingCd.length,
+    gj: queues.missingGj.length,
+    source: queues.sourceDecision.length,
+    income: queues.missingCr.length
+  };
+  const byId = id => document.getElementById(id);
+  if(byId('stats-wrap')) byId('stats-wrap').style.display = '';
+  if(byId('filter-wrap')) byId('filter-wrap').style.display = '';
+  if(byId('stat-matched')) byId('stat-matched').textContent = counts.matched;
+  if(byId('stat-review')) byId('stat-review').textContent = counts.review;
+  if(byId('stat-journal')) byId('stat-journal').textContent = counts.gj;
+  if(byId('stat-income')) byId('stat-income').textContent = counts.income;
+  if(byId('fb-all')) byId('fb-all').textContent = tabPairs.length;
+  if(byId('fb-matched')) byId('fb-matched').textContent = counts.matched;
+  if(byId('fb-review')) byId('fb-review').textContent = counts.review;
+  if(byId('fb-resolved')) byId('fb-resolved').textContent = counts.resolved;
+  if(byId('fb-cd')) byId('fb-cd').textContent = counts.cd;
+  if(byId('fb-gj')) byId('fb-gj').textContent = counts.gj;
+  if(byId('fb-source')) byId('fb-source').textContent = counts.source;
+  if(byId('fb-income')) byId('fb-income').textContent = counts.income;
+  if(byId('fb-cd')) byId('fb-cd').closest('button').style.display = currentTab === 'expenses' ? '' : 'none';
+  if(byId('fb-income')) byId('fb-income').closest('button').style.display = currentTab === 'deposits' ? '' : 'none';
+}
+
+function setFilter(filter, btn){
+  currentFilter = filter;
+  document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+  if(btn) btn.classList.add('active');
+  saveSessionState(false);
+  renderWorkspace();
+}
+
+function setLegendFilter(filter){
+  currentFilter = currentFilter === filter ? 'all' : filter;
+  document.querySelectorAll('.filter-btn').forEach(b => {
+    const action = b.getAttribute('onclick') || '';
+    const active = action.includes(`'${currentFilter}'`);
+    b.classList.toggle('active', active);
+  });
+  saveSessionState(false);
+  renderWorkspace();
+}
+
+function setTab(tab){
+  currentTab = tab;
+  currentFilter = 'all';
+  saveSessionState(false);
+  updateSideStats();
+  renderWorkspace();
+}
+
+function setSort(field){
+  if(currentSort.field === field){
+    currentSort.direction = currentSort.direction === 'asc' ? 'desc' : 'asc';
+  } else {
+    currentSort = {field, direction: field === 'amount' ? 'desc' : 'asc'};
+  }
+  saveSessionState(false);
+  renderWorkspace();
+}
+
+function currentSortLabel(){
+  const label = {
+    date:'Date',
+    amount:'Amount',
+    kind:'Type',
+    description:'Description',
+    status:'Status',
+    ref:'Reference'
+  }[currentSort.field] || 'Date';
+  return `${label} ${currentSort.direction === 'asc' ? '↑' : '↓'}`;
+}
+
+function sortIndicator(field){
+  return currentSort.field === field ? (currentSort.direction === 'asc' ? ' ↑' : ' ↓') : '';
+}
+
+function matchesCurrentFilter(pair){
+  const status = getPairStatus(pair);
+  if(currentFilter === 'all') return true;
+  const confirmed = isConfirmedResolution(status);
+  const expected = expectedBookSource(pair);
+  const unresolvedBankOnly = !!pair.bank && !pair.book && !confirmed && status !== 'reviewed-only';
+  if(currentFilter === 'income') return currentTab === 'deposits' && unresolvedBankOnly && expected === 'cr';
+  if(currentFilter === 'review') return status === 'review' || status === 'balance-match';
+  if(currentFilter === 'resolved') return confirmed;
+  if(currentFilter === 'resolved-cd') return status === 'resolved-cd';
+  if(currentFilter === 'resolved-gj') return status === 'resolved-gj';
+  if(currentFilter === 'resolved-cr') return status === 'resolved-cr';
+  if(currentFilter === 'missing-cd') return unresolvedBankOnly && expected === 'cd';
+  if(currentFilter === 'missing-gj' || currentFilter === 'needs-journal') return unresolvedBankOnly && expected === 'gj';
+  if(currentFilter === 'source-decision') return unresolvedBankOnly && !expected;
+  if(currentFilter === 'journaled') return status === 'resolved-gj';
+  if(currentFilter === 'matched') return status === 'matched';
+  if(currentFilter === 'outstanding'){
+    return status === 'outstanding' || (!pair.bank && pair.book) || (!!pair.bank && !pair.book && status !== 'needs-journal' && status !== 'review' && status !== 'income');
+  }
+  return status === currentFilter;
+}
+
+function getWorkflowCategory(pair){
+  const label = String(pair.bank ? pair.bank.label : pair.book ? pair.book.label : '').toUpperCase();
+  const detail = String(pair.bank ? pair.bank.tx.detail : '').toUpperCase();
+  if(label.includes('CON EDISON') || label.includes('NATIONAL GRID') || label.includes('WATER') || detail.includes('CON ED') || detail.includes('NGRID')) return 'utility';
+  if(label.includes('PAYROLL') || detail.includes('PAYROLL')) return 'payroll';
+  if(label.includes('INSURANCE') || detail.includes('INS PREM')) return 'insurance';
+  if(label.includes('UNION') || detail.includes('UNION')) return '32bj';
+  if(label.includes('BANK CHARGE') || detail.includes('SERVICE CHARGE')) return 'fee';
+  if(label.includes('TRANSFER') || detail.includes('TRANSFER')) return 'transfer';
+  return 'default';
+}
+
+function toneClass(pair){
+  return `tone-${getWorkflowCategory(pair)}`;
+}
+
+function sourceLabel(source){
+  return {cd:'CD / Invoice',gj:'GJ / Journal',cr:'CR / Deposit'}[source] || 'Book';
+}
+
+function sourceChip(pair){
+  const actual=actualBookSource(pair);
+  const expected=expectedBookSource(pair);
+  if(pair.bank && pair.book && actual) return `<span class="vendor-chip ${actual}">Bank + ${sourceLabel(actual)}</span>`;
+  if(pair.book && actual) return `<span class="vendor-chip ${actual}">${sourceLabel(actual)} only</span>`;
+  if(pair.bank && expected) return `<span class="vendor-chip bank">Bank only</span><span class="vendor-chip ${expected}">Expected ${sourceLabel(expected)}</span>`;
+  if(pair.bank) return '<span class="vendor-chip bank">Bank only · source undecided</span>';
+  return '';
+}
+
+function isConfirmedResolution(status){
+  return ['resolved-cd','resolved-gj','resolved-cr'].includes(status);
+}
+
+function getActionQueues(pairs){
+  const allPairs = Array.isArray(pairs) ? pairs : [...expensePairs, ...depositPairs];
+  const unresolvedBank = allPairs.filter(p => p.bank && !p.book && !isConfirmedResolution(getPairStatus(p)));
+  const missingCd = unresolvedBank.filter(p => expectedBookSource(p) === 'cd');
+  const missingGj = unresolvedBank.filter(p => expectedBookSource(p) === 'gj');
+  const missingCr = unresolvedBank.filter(p => expectedBookSource(p) === 'cr');
+  const sourceDecision = unresolvedBank.filter(p => !expectedBookSource(p));
+  const confirmed = allPairs.filter(p => isConfirmedResolution(getPairStatus(p)));
+  const needsReview = allPairs.filter(p => {
+    const status = getPairStatus(p);
+    return !!p.bank && !!p.book && (status === 'review' || status === 'balance-match');
+  });
+  const timing = allPairs.filter(p => {
+    const status = getPairStatus(p);
+    return status === 'outstanding' || (p.book && !p.bank);
+  });
+  return {missingCd, missingGj, missingCr, sourceDecision, confirmed, needsReview, timing};
+}
+
+function sumPairsAmount(pairs){
+  return pairs.reduce((sum,p) => sum + (p.bank ? p.bank.tx.amountAbs : p.book ? Math.abs(p.book.amountSigned) : 0), 0);
+}
+
+function sumBankAmount(pairs){
+  return pairs.filter(p => p.bank).reduce((sum,p) => sum + p.bank.tx.amountAbs, 0);
+}
+
+function jumpToSection(id){
+  const el = document.getElementById(id);
+  if(el) el.scrollIntoView({behavior:'smooth', block:'start'});
+}
+
+function groupPairsByVendor(pairs){
+  const groups = {};
+  pairs.forEach(pair => {
+    const key = String(pair.bank ? pair.bank.label : pair.book ? (pair.book.label || pair.book.description || pair.book.subsidiary || 'Other') : 'Other');
+    if(!groups[key]) groups[key] = [];
+    groups[key].push(pair);
+  });
+  return Object.entries(groups).sort((a,b) => b[1].length - a[1].length || a[0].localeCompare(b[0]));
+}
+
+function groupDomId(name){
+  return String(name || 'group').toLowerCase().replace(/[^a-z0-9]+/g, '-');
+}
+
+function toggleGroup(name){
+  const key = groupDomId(name);
+  if(collapsedGroups.has(key)) collapsedGroups.delete(key);
+  else collapsedGroups.add(key);
+  saveSessionState(false);
+  renderWorkspace();
+}
+
+function renderActionTable(pairs, emptyText){
+  if(!pairs.length) return `<div class="empty">${emptyText}</div>`;
+  const groups = groupPairsByVendor(pairs);
+  return groups.map(([name, items]) => {
+    const key = groupDomId(name);
+    const collapsed = !collapsedGroups.has(key);
+    return `
+    <div class="group-block ${collapsed ? 'collapsed' : ''}">
+      <div class="group-title" onclick="toggleGroup(${JSON.stringify(name).replace(/"/g, '&quot;')})">
+        <div class="group-label">
+          <span class="group-caret">${collapsed ? '&#9656;' : '&#9662;'}</span>
+          <span>${name}</span>
+          <span class="group-meta">${items.length} item${items.length === 1 ? '' : 's'}</span>
+        </div>
+      </div>
+      <div class="group-content">
+      <div class="mini-table-header">
+        <div>Date</div><div>Type / Ref</div><div>Description</div><div>Status</div><div style="text-align:right">Amount</div>
+      </div>
+      ${items.map(pair => {
+        const bank = pair.bank;
+        const book = pair.book;
+      const status = getPairStatus(pair);
+      const desc = bank ? (bank.tx.detail || bank.label) : (book ? (book.description || book.subsidiary || book.label) : '');
+      const left = bank ? formatDate(bank.tx.date) : (book ? formatDate(book.date) : '-');
+      const mid = bank ? (bank.tx.description || '-') : (book ? (book.checkNo || book.source || '-') : '-');
+      const amt = bank ? bank.tx.amount : (book ? book.amountSigned : 0);
+      const resolutionBox = resolutionControl(pair);
+      return `<div class="mini-row ${toneClass(pair)}">
+          <div class="mono">${left}</div>
+          <div class="mono">${mid}</div>
+          <div class="desc"><strong>${bank ? bank.label : book ? (book.label || name) : name}</strong><span>${desc}</span><div style="margin-top:5px;">${sourceChip(pair)}</div></div>
+          <div class="status-cell">${statusTag(status)}${resolutionBox}</div>
+          <div class="amt ${amt < 0 ? 'neg' : 'pos'}">${moneySigned(amt)}</div>
+        </div>`;
+      }).join('')}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function renderTimingBody(pairs){
+  const bankSide = pairs.filter(pair => !!pair.bank);
+  const bookOnly = pairs.filter(pair => !pair.bank && !!pair.book);
+  return `
+    <div class="subsection-head">Matched bank items<span class="subsection-note">Resolved items already tied to bank activity</span></div>
+    ${renderActionTable(bankSide, 'No matched bank items right now.')}
+    <div class="subsection-head">Book-only outstanding<span class="subsection-note">Lower priority unless you want to inspect book items not yet on the bank</span></div>
+    ${renderActionTable(bookOnly, 'No book-only outstanding items right now.')}
+  `;
+}
+
+function renderEmptyWorkspace(){
+  const property=document.getElementById('cloud-property')?.value||'';
+  const month=document.getElementById('cloud-month')?.value||'';
+  const setupReady=!!property&&!!month;
+  const bankReady=bankData.length>0;
+  const bookRows=gjData.length+checkData.length+depositData.length;
+  const booksReady=bookRows>0;
+  const nextStep=!setupReady?1:!bankReady?2:!booksReady?3:4;
+  const step=(number,title,copy,ready)=>`<div class="workflow-step ${ready?'ready':number===nextStep?'active':''}"><span class="step-no">${ready?'&#10003;':number}</span><strong>${title}</strong><p>${copy}</p></div>`;
+  const source=(title,role,count,loaded)=>`<div class="source-item ${loaded?'loaded':''}"><div class="source-label">${title}</div><div class="source-role">${role}</div><span class="source-state">${loaded?`${count.toLocaleString()} rows ready`:'Waiting for file'}</span></div>`;
+  const statusTitle=!setupReady?'Choose a property to begin':!bankReady?'Workspace ready for bank activity':!booksReady?'Bank activity loaded':'Ready to match';
+  const statusCopy=!setupReady?'Property and reporting month identify the cloud workspace.':!bankReady?'Upload the bank export; it is the only required file.':!booksReady?'Add the available ledger activity for stronger matching.':'Click Match to build the bank-versus-books review.';
+  return `<div class="welcome-shell">
+    <section class="welcome-hero">
+      <div><div class="welcome-eyebrow">Bank reconciliation workflow</div><h3>Start or resume a monthly reconciliation</h3><p>Select the property and reporting month, load the available bank and ledger exports, then review matched and unresolved activity in one shared workspace.</p></div>
+      <div class="welcome-status"><strong>${statusTitle}</strong><span>${statusCopy}</span></div>
+    </section>
+    <section class="workflow-steps">
+      ${step(1,'Set up workspace','Choose the property, month and optional bank-account identifier.',setupReady)}
+      ${step(2,'Load bank activity','Upload the bank export used as the reconciliation base.',bankReady)}
+      ${step(3,'Add ledger records','Load journals, disbursements, receipts and the chart of accounts.',booksReady)}
+      ${step(4,'Match and review','Run matching, resolve exceptions, prepare journals and save.',false)}
+    </section>
+    <section class="source-panel">
+      <div class="source-panel-head"><h4>Source readiness</h4><span>The bank export is required; ledger sources may be added as available.</span></div>
+      <div class="source-grid">
+        ${source('Bank export','Required reconciliation base',bankData.length,bankReady)}
+        ${source('General journal','Manual and journal activity',gjData.length,gjData.length>0)}
+        ${source('Cash disbursements','Checks and uploaded invoices',checkData.length,checkData.length>0)}
+        ${source('Cash receipts','Receipts and deposit activity',depositData.length,depositData.length>0)}
+        ${source('Chart of accounts','Official account names',Object.keys(accountCatalog).length,Object.keys(accountCatalog).length>0)}
+      </div>
+    </section>
+    <div class="welcome-note"><strong>Demo mode:</strong><span>Click <em>Load sample data</em> to see a full reconciliation with fictional data, or upload your own CSV/Excel exports. Saved work stays in this browser only.</span></div>
+  </div>`;
+}
+
+function renderWorkspace(){
+  const body = document.getElementById('workspace-body');
+  if(!results.length){
+    body.innerHTML = renderEmptyWorkspace();
+    return;
+  }
+
+  const summary = calculateSummary();
+  const activePairs = filteredPairs();
+  const bankRows = activePairs.filter(p => p.bank);
+  const bookRows = activePairs.filter(p => p.book);
+  const activeTabPairs = currentTab === 'expenses' ? expensePairs : depositPairs;
+  const queues = getActionQueues(activeTabPairs);
+
+  document.getElementById('title-main').textContent = `Bank Reconciliation For ${summary.period}`;
+  const sessionNote = currentSavedSessionName ? `Saved session: ${currentSavedSessionName}. ` : '';
+  document.getElementById('title-sub').textContent = `${sessionNote}Bank left, books right. ${bankRows.length} bank lines and ${bookRows.length} book lines shown in the current view.`;
+
+  const activeSummary = currentTab === 'expenses' ? summary.expenses : summary.deposits;
+  const activeLabel = currentTab === 'expenses' ? 'Expenses / Checks' : 'Deposits / Income';
+  const isExpenseTab = currentTab === 'expenses';
+  const primaryMissing = isExpenseTab ? queues.missingCd : queues.missingCr;
+  const primaryMissingCode = isExpenseTab ? 'CD' : 'CR';
+  const sourceResolvedOther = activeSummary.timingOtherBank + (isExpenseTab ? activeSummary.crBank : activeSummary.cdBank);
+  const totalBankItems = activeTabPairs.filter(p => p.bank).length;
+  const totalBankAmount = sumBankAmount(activeTabPairs);
+  const matchedPairs = activeTabPairs.filter(p => getPairStatus(p) === 'matched');
+  const matchedBankCount = matchedPairs.filter(p => p.bank).length;
+  const matchedBankAmount = sumBankAmount(matchedPairs);
+  const balance=summary.balanceControl;
+  const balanceDifferenceClass=balance.difference==null?'':(Math.abs(balance.difference)<=0.005?'ok':'open');
+
+  body.innerHTML = `
+    <div class="summary-grid">
+      <section class="statement-control">
+        <div class="statement-control-head">
+          <h3>Statement Balance Control</h3>
+          <span>Beginning balance + bank deposits − bank expenses = calculated ending balance</span>
+        </div>
+        <div class="statement-metrics">
+          <div class="statement-metric"><div class="k">BOM balance</div><div class="v">${moneyOrDash(balance.beginningBalance)}</div></div>
+          <div class="statement-metric"><div class="k">+ Bank deposits</div><div class="v">${money(balance.bankDeposits)}</div></div>
+          <div class="statement-metric"><div class="k">− Bank expenses</div><div class="v">${money(balance.bankExpenses)}</div></div>
+          <div class="statement-metric result"><div class="k">Calculated EOM</div><div class="v">${moneyOrDash(balance.calculatedEndingBalance)}</div></div>
+          <div class="statement-metric"><div class="k">Statement EOM</div><div class="v">${moneyOrDash(balance.endingBalance)}</div></div>
+          <div class="statement-metric difference ${balanceDifferenceClass}"><div class="k">Difference</div><div class="v">${moneyOrDash(balance.difference)}</div></div>
+        </div>
+      </section>
+      <section class="summary-panel">
+        <div class="summary-header">
+          <h3>${activeLabel}</h3>
+          <div class="summary-sub">${summary.period} section summary</div>
+        </div>
+        <div class="summary-split">
+          <div class="summary-col">
+            <h4>Bank</h4>
+            <table class="summary-table">
+              <tr><td>Total Bank ${currentTab === 'expenses' ? 'Expenses' : 'Deposits'}</td><td>${money(activeSummary.bankTotal)}</td></tr>
+              ${isExpenseTab
+                ? `<tr><td>Cleared Checks / Invoices in CD</td><td>${money(activeSummary.cdBank)}</td></tr>`
+                : `<tr><td>Cleared Receipts / Deposits in CR</td><td>${money(activeSummary.crBank)}</td></tr>`}
+              <tr><td>Journalized Adjustments in GJ</td><td>${money(activeSummary.gjBank)}</td></tr>
+              ${sourceResolvedOther > 0 ? `<tr><td>Other Source Resolution</td><td>${money(sourceResolvedOther)}</td></tr>` : ''}
+              <tr><td>Total Bank Resolved</td><td>${money(activeSummary.totalResolvedBank)}</td></tr>
+              <tr><td>Unresolved Bank Total</td><td>${money(activeSummary.unresolvedBank)}</td></tr>
+            </table>
+          </div>
+          <div class="summary-col">
+            <h4>Book</h4>
+            <table class="summary-table">
+              <tr><td>Total Book ${currentTab === 'expenses' ? 'Expenses' : 'Deposits'}</td><td>${money(activeSummary.bookTotal)}</td></tr>
+              <tr><td>Resolved Book</td><td>${money(activeSummary.matchedBook)}</td></tr>
+              <tr><td>Book Review</td><td>${money(activeSummary.actionBook)}</td></tr>
+              <tr><td>Outstanding / Timing</td><td>${money(activeSummary.timingBook)}</td></tr>
+              <tr><td>Unresolved Book Total</td><td>${money(activeSummary.unresolvedBook)}</td></tr>
+              <tr><td>Bank vs Book Gap</td><td>${moneySigned(activeSummary.openGap)}</td></tr>
+            </table>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <div class="tabs">
+      <button class="tab ${currentTab === 'expenses' ? 'active' : ''}" onclick="setTab('expenses')">Expenses / Checks</button>
+      <button class="tab ${currentTab === 'deposits' ? 'active' : ''}" onclick="setTab('deposits')">Deposits / Income</button>
+    </div>
+
+    <section class="split-shell">
+      <div class="split-toolbar">
+        <h3>${currentTab === 'expenses' ? 'Expenses Split View' : 'Deposits Split View'}</h3>
+        <div class="legend">
+          <button class="pill green ${currentFilter === 'matched' ? 'active' : ''}" onclick="setLegendFilter('matched')">High confidence matched</button>
+          <button class="pill amber ${currentFilter === 'review' ? 'active' : ''}" onclick="setLegendFilter('review')">Needs review</button>
+          ${isExpenseTab
+            ? `<button class="pill blue ${currentFilter === 'resolved-cd' ? 'active' : ''}" onclick="setLegendFilter('resolved-cd')">Uploaded / cleared in CD</button>`
+            : `<button class="pill blue ${currentFilter === 'resolved-cr' ? 'active' : ''}" onclick="setLegendFilter('resolved-cr')">Cleared in CR</button>`}
+          <button class="pill indigo ${currentFilter === 'resolved-gj' ? 'active' : ''}" onclick="setLegendFilter('resolved-gj')">Journalized in GJ</button>
+          ${isExpenseTab ? `<button class="pill amber ${currentFilter === 'missing-cd' ? 'active' : ''}" onclick="setLegendFilter('missing-cd')">Missing CD</button>` : ''}
+          <button class="pill red ${currentFilter === 'missing-gj' ? 'active' : ''}" onclick="setLegendFilter('missing-gj')">Missing GJ</button>
+          ${!isExpenseTab ? `<button class="pill purple ${currentFilter === 'income' ? 'active' : ''}" onclick="setLegendFilter('income')">Missing CR</button>` : ''}
+          <button class="pill gray ${currentFilter === 'source-decision' ? 'active' : ''}" onclick="setLegendFilter('source-decision')">Source decision</button>
+          <button class="pill gray ${currentFilter === 'outstanding' ? 'active' : ''}" onclick="setLegendFilter('outstanding')">Book only / outstanding</button>
+        </div>
+      </div>
+      <div class="split-grid">
+        <div class="pane">
+          <div class="pane-head">
+            <h4>Bank</h4>
+            <p>Ordered by ${currentSortLabel().toLowerCase()} and filtered by current tab.</p>
+          </div>
+          <div class="pane-body">${renderBankPane(activePairs)}</div>
+        </div>
+        <div class="pane">
+          <div class="pane-head">
+            <h4>Book</h4>
+            <p>Matched book items plus book-only lines that still need attention.</p>
+          </div>
+          <div class="pane-body">${renderBookPane(activePairs)}</div>
+        </div>
+      </div>
+    </section>
+
+    <div class="queue-grid">
+      <div class="queue-card timing" onclick="setFilter('all')">
+        <h4>Total Bank Rows</h4>
+        <div class="big">${totalBankItems}</div>
+        <div class="amt">${money(totalBankAmount)}</div>
+      </div>
+      <div class="queue-card upload" onclick="jumpToSection('section-primary-missing')">
+        <h4>Missing ${primaryMissingCode}</h4>
+        <div class="big">${primaryMissing.length}</div>
+        <div class="amt">${money(sumPairsAmount(primaryMissing))}</div>
+      </div>
+      <div class="queue-card journal" onclick="jumpToSection('section-gj')">
+        <h4>Missing GJ</h4>
+        <div class="big">${queues.missingGj.length}</div>
+        <div class="amt">${money(sumPairsAmount(queues.missingGj))}</div>
+      </div>
+      <div class="queue-card review" onclick="jumpToSection('section-source')">
+        <h4>Source Decision</h4>
+        <div class="big">${queues.sourceDecision.length}</div>
+        <div class="amt">${money(sumPairsAmount(queues.sourceDecision))}</div>
+      </div>
+      <div class="queue-card review" onclick="jumpToSection('section-review')">
+        <h4>Needs Review</h4>
+        <div class="big">${queues.needsReview.length}</div>
+        <div class="amt">${money(sumPairsAmount(queues.needsReview))}</div>
+      </div>
+      <div class="queue-card journaled" onclick="jumpToSection('section-resolved')">
+        <h4>Resolved by Source</h4>
+        <div class="big">${queues.confirmed.length}</div>
+        <div class="amt">${money(sumPairsAmount(queues.confirmed))}</div>
+      </div>
+      <div class="queue-card timing" onclick="jumpToSection('section-timing')">
+        <h4>Matched</h4>
+        <div class="big">${matchedBankCount}</div>
+        <div class="amt">${money(matchedBankAmount)}</div>
+      </div>
+    </div>
+
+    <section class="action-section" id="section-primary-missing">
+      <div class="action-head"><h3>Missing ${primaryMissingCode} / ${isExpenseTab ? 'Invoice or Check' : 'Receipt or Deposit'}</h3><div class="summary-sub">${isExpenseTab ? 'Expense activity expected in the invoice/check-disbursement source' : 'Deposit activity expected in the cash-receipts source'}</div></div>
+      <div class="action-body">${renderActionTable(primaryMissing, 'No missing ' + primaryMissingCode + ' items right now.')}</div>
+    </section>
+
+    <section class="action-section" id="section-gj">
+      <div class="action-head"><h3>Missing GJ / Journal</h3><div class="summary-sub">Bank activity expected in the general-journal source</div></div>
+      <div class="action-body">${renderActionTable(queues.missingGj, 'No missing GJ items right now.')}</div>
+    </section>
+
+    <section class="action-section" id="section-source">
+      <div class="action-head"><h3>Source Decision</h3><div class="summary-sub">Choose whether each open bank item belongs in CD, GJ, CR, timing, or should be ignored</div></div>
+      <div class="action-body">${renderActionTable(queues.sourceDecision, 'No source decisions are waiting.')}</div>
+    </section>
+
+    <section class="action-section" id="section-review">
+      <div class="action-head"><h3>Review Queue</h3><div class="summary-sub">Items that are close matches, balance matches, or ambiguous</div></div>
+      <div class="action-body">${renderActionTable(queues.needsReview, 'No review items right now.')}</div>
+    </section>
+
+    <section class="action-section" id="section-resolved">
+      <div class="action-head"><h3>Resolved by Source</h3><div class="summary-sub">Shows exactly whether each item was uploaded in CD, journalized in GJ, or cleared in CR</div></div>
+      <div class="action-body">${renderActionTable(queues.confirmed, 'No manually confirmed items right now.')}</div>
+    </section>
+
+    <section class="action-section" id="section-timing">
+      <div class="action-head"><h3>Matched</h3><div class="summary-sub">Matched bank and book items for audit trail.</div></div>
+      <div class="action-body">${renderTimingBody(queues.timing.concat([...expensePairs, ...depositPairs].filter(p => getPairStatus(p) === 'matched').slice(0,40)))}</div>
+    </section>`;
+}
+
+function filteredPairs(){
+  let pairs = currentTab === 'expenses' ? [...expensePairs] : [...depositPairs];
+  pairs = pairs.filter(matchesCurrentFilter);
+  const q = document.getElementById('search-input').value.trim().toLowerCase();
+  if(q){
+    pairs = pairs.filter(pair => {
+      const text = [
+        pair.bank ? pair.bank.tx.detail : '',
+        pair.bank ? pair.bank.label : '',
+        pair.book ? pair.book.description : '',
+        pair.book ? pair.book.subsidiary : '',
+        pair.book ? pair.book.source : ''
+      ].join(' ').toLowerCase();
+      return text.includes(q) || String(pair.bank ? pair.bank.tx.amountAbs : pair.book ? pair.book.amountAbs : '').includes(q);
+    });
+  }
+  pairs.sort((a,b) => {
+    const aDate = a.bank ? a.bank.tx.date : a.book ? a.book.date : null;
+    const bDate = b.bank ? b.bank.tx.date : b.book ? b.book.date : null;
+    const aAmt = a.bank ? a.bank.tx.amountAbs : a.book ? a.book.amountAbs : 0;
+    const bAmt = b.bank ? b.bank.tx.amountAbs : b.book ? b.book.amountAbs : 0;
+    const aKind = String(a.bank ? a.bank.tx.description : a.book ? (a.book.checkNo || a.book.source || '') : '').toLowerCase();
+    const bKind = String(b.bank ? b.bank.tx.description : b.book ? (b.book.checkNo || b.book.source || '') : '').toLowerCase();
+    const aDesc = String(a.bank ? a.bank.label : a.book ? (a.book.label || a.book.description || a.book.subsidiary) : '').toLowerCase();
+    const bDesc = String(b.bank ? b.bank.label : b.book ? (b.book.label || b.book.description || b.book.subsidiary) : '').toLowerCase();
+    const aStatus = String(a.bank ? a.bank.status : a.book ? a.book.status : '').toLowerCase();
+    const bStatus = String(b.bank ? b.bank.status : b.book ? b.book.status : '').toLowerCase();
+    const aRef = String(a.bank ? (a.bank.tx.checkNo || '') : a.book ? (a.book.checkNo || a.book.source || '') : '').toLowerCase();
+    const bRef = String(b.bank ? (b.bank.tx.checkNo || '') : b.book ? (b.book.checkNo || b.book.source || '') : '').toLowerCase();
+
+    let result = 0;
+    if(currentSort.field === 'amount') result = aAmt - bAmt;
+    else if(currentSort.field === 'kind') result = aKind.localeCompare(bKind);
+    else if(currentSort.field === 'description') result = aDesc.localeCompare(bDesc);
+    else if(currentSort.field === 'status') result = aStatus.localeCompare(bStatus);
+    else if(currentSort.field === 'ref') result = aRef.localeCompare(bRef);
+    else result = (aDate||0) - (bDate||0);
+
+    if(result === 0) result = aDesc.localeCompare(bDesc) || (aAmt - bAmt);
+    return currentSort.direction === 'asc' ? result : -result;
+  });
+  return pairs;
+}
+
+function renderBankPane(pairs){
+  const header = `<div class="row-header">
+    <div onclick="setSort('date')" style="cursor:pointer">Date${sortIndicator('date')}</div>
+    <div onclick="setSort('kind')" style="cursor:pointer">Type${sortIndicator('kind')}</div>
+    <div onclick="setSort('description')" style="cursor:pointer">Description${sortIndicator('description')}</div>
+    <div onclick="setSort('status')" style="cursor:pointer">Status${sortIndicator('status')}</div>
+    <div onclick="setSort('amount')" style="cursor:pointer;text-align:right">Amount${sortIndicator('amount')}</div>
+  </div>`;
+  const rows = pairs.filter(p => p.bank).map(p => {
+    const r = p.bank;
+    const status = getPairStatus(p);
+    const resolutionBox = resolutionControl(p);
+    return `<div class="row">
+      <div class="mono">${formatDate(r.tx.date)}</div>
+      <div class="mono">${r.tx.description || '-'}</div>
+      <div class="desc">
+        <strong>${r.label}</strong>
+        <span>${r.tx.detail || ''}</span>
+        ${r.confidence === 'high' ? '<span class="conf">HIGH</span>' : r.confidence === 'medium' ? '<span class="conf">MEDIUM</span>' : ''}
+        <div style="margin-top:5px;">${sourceChip(p)}</div>
+      </div>
+      <div>${statusTag(status)}${resolutionBox}</div>
+      <div class="amt ${r.tx.amount < 0 ? 'neg' : 'pos'}">${moneySigned(r.tx.amount)}</div>
+    </div>`;
+  }).join('');
+  return header + (rows || `<div class="empty">No bank rows in this view.</div>`);
+}
+
+function renderBookPane(pairs){
+  const header = `<div class="row-header book">
+    <div onclick="setSort('date')" style="cursor:pointer">Date${sortIndicator('date')}</div>
+    <div onclick="setSort('ref')" style="cursor:pointer">Ref${sortIndicator('ref')}</div>
+    <div onclick="setSort('description')" style="cursor:pointer">Description${sortIndicator('description')}</div>
+    <div onclick="setSort('status')" style="cursor:pointer">Status${sortIndicator('status')}</div>
+    <div onclick="setSort('amount')" style="cursor:pointer;text-align:right">Amount${sortIndicator('amount')}</div>
+  </div>`;
+  const rows = pairs.filter(p => p.book).map(p => {
+    const b = p.book;
+    const status = getPairStatus(p);
+    return `<div class="row book">
+      <div class="mono">${formatDate(b.date)}</div>
+      <div class="mono">${b.checkNo || b.source || '-'}</div>
+      <div class="desc">
+        <strong>${b.label || b.subsidiary || b.description || 'Book Item'}</strong>
+        <span>${b.subsidiary || b.description || b.source || ''}</span>
+        ${b.confidence === 'high' ? '<span class="conf">HIGH</span>' : b.confidence === 'medium' ? '<span class="conf">MEDIUM</span>' : ''}
+        <div style="margin-top:5px;">${sourceChip(p)}</div>
+      </div>
+      <div>${bookStatusTag(status)}</div>
+      <div class="amt ${b.amountSigned < 0 ? 'neg' : 'pos'}">${moneySigned(b.amountSigned)}</div>
+    </div>`;
+  }).join('');
+  return header + (rows || `<div class="empty">No book rows in this view.</div>`);
+}
+
+function statusTag(status){
+  if(status === 'matched') return '<span class="tag matched">Matched</span>';
+  if(status === 'balance-match') return '<span class="tag matched">Close balance match</span>';
+  if(status === 'resolved-cd') return '<span class="tag matched">Uploaded / cleared in CD</span>';
+  if(status === 'resolved-gj') return '<span class="tag journaled">Journalized in GJ</span>';
+  if(status === 'resolved-cr') return '<span class="tag matched">Cleared in CR</span>';
+  if(status === 'bank-reviewed') return '<span class="tag reviewed">Bank reviewed</span>';
+  if(status === 'bank-journaled') return '<span class="tag journaled">Bank journaled</span>';
+  if(status === 'review') return '<span class="tag review">Bank review</span>';
+  if(status === 'needs-journal') return '<span class="tag journal">Bank needs journal</span>';
+  if(status === 'income') return '<span class="tag income">Bank needs deposit match</span>';
+  return '<span class="tag outstanding">Bank open</span>';
+}
+
+function bookStatusTag(status){
+  if(status === 'matched') return '<span class="tag matched">Matched</span>';
+  if(status === 'balance-match') return '<span class="tag matched">Close balance match</span>';
+  if(status === 'resolved-cd') return '<span class="tag matched">Uploaded / cleared in CD</span>';
+  if(status === 'resolved-gj') return '<span class="tag journaled">Journalized in GJ</span>';
+  if(status === 'resolved-cr') return '<span class="tag matched">Cleared in CR</span>';
+  if(status === 'bank-reviewed') return '<span class="tag reviewed">Bank reviewed</span>';
+  if(status === 'bank-journaled') return '<span class="tag journaled">Bank journaled</span>';
+  if(status === 'review') return '<span class="tag review">Book review</span>';
+  if(status === 'needs-journal') return '<span class="tag journal">Bank needs journal</span>';
+  if(status === 'income') return '<span class="tag income">Bank needs deposit match</span>';
+  return '<span class="tag outstanding">Book outstanding</span>';
+}
+
+function calculateSummary(){
+  const periodDate = results.find(r => r.tx.date)?.tx.date || new Date();
+  const period = `${String(periodDate.getMonth()+1).padStart(2,'0')}/${String(periodDate.getFullYear()).slice(2)}`;
+
+  const summarizePairs = (pairs) => {
+    const isMatchedLike = p => getPairStatus(p) === 'matched' && !!p.bank && !!p.book;
+    const isConfirmedBank = p => p.bank && isConfirmedResolution(getPairStatus(p));
+    const isReviewedBank = p => p.bank && getPairStatus(p) === 'reviewed-only';
+    const isActionBank = p => p.bank && !isMatchedLike(p) && !isConfirmedBank(p) && !isReviewedBank(p) && ['review','balance-match','needs-journal','income'].includes(getPairStatus(p));
+    const isTimingBank = p => p.bank && !isMatchedLike(p) && !isConfirmedBank(p) && !isReviewedBank(p) && !isActionBank(p);
+    const isActionBook = p => p.book && ['review','balance-match'].includes(getPairStatus(p));
+    const isTimingBook = p => p.book && !isMatchedLike(p) && !isConfirmedResolution(getPairStatus(p)) && !isActionBook(p);
+    const bankTotal = pairs.filter(p => p.bank).reduce((sum,p) => sum + p.bank.tx.amountAbs, 0);
+    const bookTotal = pairs.filter(p => p.book).reduce((sum,p) => sum + Math.abs(p.book.amountSigned), 0);
+    const matchedBank = pairs.filter(p => p.bank && isMatchedLike(p)).reduce((sum,p) => sum + p.bank.tx.amountAbs, 0);
+    const matchedBook = pairs.filter(p => p.book && (isMatchedLike(p) || isConfirmedResolution(getPairStatus(p)))).reduce((sum,p) => sum + Math.abs(p.book.amountSigned), 0);
+    const reviewedBank = pairs.filter(isReviewedBank).reduce((sum,p) => sum + p.bank.tx.amountAbs, 0);
+    const confirmedBank = pairs.filter(isConfirmedBank).reduce((sum,p) => sum + p.bank.tx.amountAbs, 0);
+    const cdBank = pairs.filter(p => p.bank && (getPairStatus(p) === 'resolved-cd' || (isMatchedLike(p) && actualBookSource(p) === 'cd'))).reduce((sum,p) => sum + p.bank.tx.amountAbs, 0);
+    const gjBank = pairs.filter(p => p.bank && (getPairStatus(p) === 'resolved-gj' || (isMatchedLike(p) && actualBookSource(p) === 'gj'))).reduce((sum,p) => sum + p.bank.tx.amountAbs, 0);
+    const crBank = pairs.filter(p => p.bank && (getPairStatus(p) === 'resolved-cr' || (isMatchedLike(p) && actualBookSource(p) === 'cr'))).reduce((sum,p) => sum + p.bank.tx.amountAbs, 0);
+    const timingOtherBank = pairs.filter(p => p.bank && isMatchedLike(p) && !actualBookSource(p)).reduce((sum,p) => sum + p.bank.tx.amountAbs, 0);
+    const journaledBank = gjBank;
+    const actionBank = pairs.filter(isActionBank).reduce((sum,p) => sum + p.bank.tx.amountAbs, 0);
+    const timingBank = pairs.filter(isTimingBank).reduce((sum,p) => sum + p.bank.tx.amountAbs, 0);
+    const actionBook = pairs.filter(isActionBook).reduce((sum,p) => sum + Math.abs(p.book.amountSigned), 0);
+    const timingBook = pairs.filter(isTimingBook).reduce((sum,p) => sum + Math.abs(p.book.amountSigned), 0);
+    const totalResolvedBank = matchedBank + confirmedBank;
+    const unresolvedBank = Math.max(0, bankTotal - totalResolvedBank);
+    const unresolvedBook = actionBook + timingBook;
+    return {
+      bankTotal,
+      bookTotal,
+      matchedBank,
+      matchedBook,
+      reviewedBank,
+      confirmedBank,
+      cdBank,
+      gjBank,
+      crBank,
+      timingOtherBank,
+      journaledBank,
+      totalResolvedBank,
+      unresolvedBank,
+      unresolvedBook,
+      actionBank,
+      actionBook,
+      timingBank,
+      timingBook,
+      openGap: unresolvedBank - unresolvedBook
+    };
+  };
+
+  const deposits=summarizePairs(depositPairs);
+  const expenses=summarizePairs(expensePairs);
+  const context=cloudContextValues();
+  const beginningBalance=context.beginningBalance;
+  const endingBalance=context.endingBalance;
+  const calculatedEndingBalance=beginningBalance==null
+    ? null
+    : beginningBalance+deposits.bankTotal-expenses.bankTotal;
+  const difference=calculatedEndingBalance==null||endingBalance==null
+    ? null
+    : endingBalance-calculatedEndingBalance;
+
+  return {
+    period,
+    deposits,
+    expenses,
+    balanceControl:{
+      beginningBalance,
+      bankDeposits:deposits.bankTotal,
+      bankExpenses:expenses.bankTotal,
+      calculatedEndingBalance,
+      endingBalance,
+      difference
+    },
+    matchedTotal: [...expensePairs, ...depositPairs].filter(p => getPairStatus(p) === 'matched').length,
+    matchedAmount: [...expensePairs, ...depositPairs].filter(p => getPairStatus(p) === 'matched').reduce((sum,p) => sum + (p.bank ? p.bank.tx.amountAbs : p.book ? Math.abs(p.book.amountSigned) : 0), 0)
+  };
+}
+
+function money(num){
+  return '$' + Number(num || 0).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+}
+
+function moneyOrDash(num){
+  return num==null||!Number.isFinite(Number(num))?'—':moneySigned(Number(num));
+}
+
+function moneySigned(num){
+  const amt = Number(num || 0);
+  return (amt < 0 ? '-' : '') + money(Math.abs(amt));
+}
+
+const SCRATCH_COLUMNS=['A','B','C','D','E','F'];
+const SCRATCH_ROWS=30;
+let scratchStatusTimer=null;
+let scratchFormulaInput=null;
+let scratchResizeState=null;
+let scratchAutoHidSidebar=false;
+
+function openScratchSheet(){
+  const context=cloudContextValues();
+  if(!context.propertyCode||!context.reportingMonth){
+    showToast('Choose a property and reporting month first');
+    return;
+  }
+  const title=document.getElementById('scratch-title');
+  if(title)title.textContent=`Scratch Sheet · ${context.propertyCode} · ${context.reportingMonth}`;
+  renderScratchGrid();
+  document.getElementById('scratch-panel').classList.add('open');
+  document.body.classList.add('scratch-open');
+  if(window.innerWidth<1500&&!document.body.classList.contains('sidebar-hidden')){
+    document.body.classList.add('sidebar-hidden');
+    scratchAutoHidSidebar=true;
+  }
+  updateSidebarToggleLabel();
+}
+
+function closeScratchSheet(){
+  document.getElementById('scratch-panel').classList.remove('open');
+  document.body.classList.remove('scratch-open');
+  if(scratchAutoHidSidebar){document.body.classList.remove('sidebar-hidden');scratchAutoHidSidebar=false;}
+  updateSidebarToggleLabel();
+  scratchFormulaInput=null;
+}
+
+function toggleSidebar(){
+  scratchAutoHidSidebar=false;
+  document.body.classList.toggle('sidebar-hidden');
+  updateSidebarToggleLabel();
+}
+
+function updateSidebarToggleLabel(){
+  const button=document.getElementById('sidebar-toggle-btn');
+  if(button)button.textContent=document.body.classList.contains('sidebar-hidden')?'Show Left Panel':'Hide Left Panel';
+}
+
+function startScratchResize(event){
+  event.preventDefault();
+  const current=parseFloat(getComputedStyle(document.body).getPropertyValue('--scratch-width'))||500;
+  scratchResizeState={startX:event.clientX,startWidth:current};
+  document.addEventListener('pointermove',resizeScratchSheet);
+  document.addEventListener('pointerup',stopScratchResize,{once:true});
+}
+
+function resizeScratchSheet(event){
+  if(!scratchResizeState)return;
+  const maximum=Math.max(400,window.innerWidth-420);
+  const width=Math.min(maximum,Math.max(360,scratchResizeState.startWidth+(scratchResizeState.startX-event.clientX)));
+  document.body.style.setProperty('--scratch-width',`${Math.round(width)}px`);
+}
+
+function stopScratchResize(){
+  scratchResizeState=null;
+  document.removeEventListener('pointermove',resizeScratchSheet);
+}
+
+function renderScratchGrid(){
+  const wrap=document.getElementById('scratch-grid-wrap');
+  if(!wrap)return;
+  const previousTop=wrap.scrollTop;
+  const previousLeft=wrap.scrollLeft;
+  let html='<table class="scratch-table"><thead><tr><th class="corner"></th>';
+  SCRATCH_COLUMNS.forEach(col=>{html+=`<th>${col}</th>`;});
+  html+='</tr></thead><tbody>';
+  for(let row=1;row<=SCRATCH_ROWS;row++){
+    html+=`<tr><th class="row-head">${row}</th>`;
+    SCRATCH_COLUMNS.forEach(col=>{
+      const address=`${col}${row}`;
+      const raw=String(scratchCells[address]??'');
+      const formula=raw.trim().startsWith('=');
+      const numeric=!formula&&isScratchNumericRaw(raw);
+      let shown=numeric?formatScratchNumber(Number(raw.replace(/[$,\s]/g,''))):raw;
+      let error=false;
+      if(formula){
+        try{
+          const result=evaluateScratchCell(address,new Set());
+          shown=formatScratchNumber(result);
+        }catch(_error){shown='#ERROR';error=true;}
+      }
+      html+=`<td><input class="scratch-cell${formula?' formula':''}${numeric?' number':''}${error?' error':''}" data-address="${address}" value="${escapeHtml(shown)}" onpointerdown="scratchCellPointer(event,this)" onfocus="scratchCellFocus(this)" oninput="scratchCellInput(this)" onkeydown="scratchCellKeydown(event,this)" onblur="scratchCellBlur(this)" onpaste="scratchPaste(event,this)"></td>`;
+    });
+    html+='</tr>';
+  }
+  html+='</tbody></table>';
+  wrap.innerHTML=html;
+  wrap.scrollTop=previousTop;
+  wrap.scrollLeft=previousLeft;
+}
+
+function scratchCellFocus(input){
+  const address=input.dataset.address;
+  input.value=String(scratchCells[address]??'');
+  input.classList.remove('error');
+  input.select();
+  scratchFormulaInput=input.value.trim().startsWith('=')?input:null;
+}
+
+function scratchCellPointer(event,input){
+  if(!scratchFormulaInput||scratchFormulaInput===input||!scratchFormulaInput.value.trim().startsWith('='))return;
+  event.preventDefault();
+  const address=input.dataset.address;
+  const current=scratchFormulaInput.value;
+  const needsOperator=/[A-F0-9)]$/i.test(current);
+  scratchFormulaInput.value=current+(needsOperator?'+':'')+address;
+  scratchCellInput(scratchFormulaInput);
+  scratchFormulaInput.focus();
+  scratchFormulaInput.setSelectionRange(scratchFormulaInput.value.length,scratchFormulaInput.value.length);
+}
+
+function scratchCellInput(input){
+  const address=input.dataset.address;
+  const raw=input.value;
+  if(raw==='')delete scratchCells[address];else scratchCells[address]=raw;
+  if(raw.trim().startsWith('='))scratchFormulaInput=input;
+  else if(scratchFormulaInput===input)scratchFormulaInput=null;
+  saveSessionState(false);
+  setScratchStatus('Saving calculation…');
+}
+
+function scratchCellKeydown(event,input){
+  const directions={ArrowLeft:[-1,0],ArrowRight:[1,0],ArrowUp:[0,-1],ArrowDown:[0,1]};
+  if(event.key!=='Enter'&&!directions[event.key])return;
+  event.preventDefault();
+  scratchCellInput(input);
+  scratchFormulaInput=null;
+  const [columnChange,rowChange]=event.key==='Enter'
+    ? [0,event.shiftKey?-1:1]
+    : directions[event.key];
+  moveScratchSelection(input,columnChange,rowChange);
+}
+
+function moveScratchSelection(input,columnChange,rowChange){
+  const address=input.dataset.address;
+  const columnIndex=SCRATCH_COLUMNS.indexOf(address[0]);
+  const row=Number(address.slice(1));
+  const nextColumn=SCRATCH_COLUMNS[columnIndex+columnChange];
+  const nextRow=row+rowChange;
+  const next=nextColumn&&nextRow>=1&&nextRow<=SCRATCH_ROWS
+    ? document.querySelector(`#scratch-grid-wrap .scratch-cell[data-address="${nextColumn}${nextRow}"]`)
+    : null;
+  if(next){
+    next.focus();
+    next.select();
+  }else{
+    input.blur();
+  }
+}
+
+function scratchCellBlur(input){
+  scratchCellInput(input);
+  if(scratchFormulaInput===input)scratchFormulaInput=null;
+  refreshScratchFormulaDisplays();
+  setScratchStatus(currentCloudSessionId?'Calculation autosaved with this Bank Rec.':'Calculation saved locally · use Save for shared storage.');
+}
+
+function refreshScratchFormulaDisplays(){
+  document.querySelectorAll('#scratch-grid-wrap .scratch-cell').forEach(input=>{
+    if(input===document.activeElement)return;
+    const address=input.dataset.address;
+    const raw=String(scratchCells[address]??'');
+    const formula=raw.trim().startsWith('=');
+    const numeric=!formula&&isScratchNumericRaw(raw);
+    input.classList.toggle('formula',formula);
+    input.classList.toggle('number',numeric);
+    input.classList.remove('error');
+    if(!formula){input.value=numeric?formatScratchNumber(Number(raw.replace(/[$,\s]/g,''))):raw;return;}
+    try{input.value=formatScratchNumber(evaluateScratchCell(address,new Set()));}
+    catch(_error){input.value='#ERROR';input.classList.add('error');}
+  });
+}
+
+function isScratchNumericRaw(raw){
+  const value=String(raw??'').trim();
+  if(!value)return false;
+  return /^[+\-]?\$?(?:\d{1,3}(?:,\d{3})*|\d+)(?:\.\d+)?$/.test(value)&&Number.isFinite(Number(value.replace(/[$,\s]/g,'')));
+}
+
+function formatScratchNumber(value){
+  return Number(value).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+}
+
+function scratchPaste(event,input){
+  const text=event.clipboardData?.getData('text/plain')||'';
+  if(!text.includes('\t')&&!text.includes('\n'))return;
+  event.preventDefault();
+  const start=input.dataset.address;
+  const startCol=SCRATCH_COLUMNS.indexOf(start[0]);
+  const startRow=Number(start.slice(1))-1;
+  text.replace(/\r/g,'').split('\n').filter((line,index,all)=>line!==''||index<all.length-1).forEach((line,rowOffset)=>{
+    line.split('\t').forEach((value,colOffset)=>{
+      const col=SCRATCH_COLUMNS[startCol+colOffset];
+      const row=startRow+rowOffset+1;
+      if(!col||row<1||row>SCRATCH_ROWS)return;
+      const address=`${col}${row}`;
+      if(value==='')delete scratchCells[address];else scratchCells[address]=value;
+    });
+  });
+  saveSessionState(false);
+  renderScratchGrid();
+  setScratchStatus(currentCloudSessionId?'Pasted calculation autosaved with this Bank Rec.':'Pasted calculation saved locally · use Save for shared storage.');
+}
+
+function setScratchStatus(message){
+  const status=document.getElementById('scratch-status');
+  if(status)status.textContent=message;
+  clearTimeout(scratchStatusTimer);
+  scratchStatusTimer=setTimeout(()=>{
+    if(status)status.textContent=currentCloudSessionId?'Autosaves with this Bank Rec.':'Use Save to store this sheet for the team.';
+  },2400);
+}
+
+function evaluateScratchCell(address,visiting){
+  if(visiting.has(address))throw new Error('Circular reference');
+  const raw=String(scratchCells[address]??'').trim();
+  if(!raw)return 0;
+  if(!raw.startsWith('=')){
+    const number=Number(raw.replace(/[$,\s]/g,''));
+    return Number.isFinite(number)?number:0;
+  }
+  visiting.add(address);
+  try{return evaluateScratchFormula(raw.slice(1),visiting,address);}
+  finally{visiting.delete(address);}
+}
+
+function evaluateScratchFormula(formula,visiting,currentAddress){
+  let expression=String(formula).toUpperCase();
+  if(expression.length>500)throw new Error('Formula too long');
+  expression=expression.replace(/SUM\(\s*([A-F](?:[1-9]|[12]\d|30))\s*:\s*([A-F](?:[1-9]|[12]\d|30))\s*\)/g,(_match,start,end)=>{
+    const startCol=SCRATCH_COLUMNS.indexOf(start[0]);
+    const endCol=SCRATCH_COLUMNS.indexOf(end[0]);
+    const startRow=Number(start.slice(1));
+    const endRow=Number(end.slice(1));
+    let total=0;
+    for(let c=Math.min(startCol,endCol);c<=Math.max(startCol,endCol);c++){
+      for(let r=Math.min(startRow,endRow);r<=Math.max(startRow,endRow);r++)total+=evaluateScratchCell(`${SCRATCH_COLUMNS[c]}${r}`,visiting);
+    }
+    return `(${total})`;
+  });
+  expression=expression.replace(/\b([A-F](?:[1-9]|[12]\d|30))\b/g,(_match,address)=>`(${evaluateScratchCell(address,visiting)})`);
+  const currentRow=Number(String(currentAddress||'A1').slice(1))||1;
+  expression=expression.replace(/\b([A-F])\b/g,(_match,column)=>`(${evaluateScratchCell(`${column}${currentRow}`,visiting)})`);
+  if(!/^[0-9E+\-*/^().\s]+$/.test(expression))throw new Error('Unsupported formula');
+  const result=calculateScratchArithmetic(expression);
+  if(!Number.isFinite(result))throw new Error('Invalid result');
+  return result;
+}
+
+function calculateScratchArithmetic(expression){
+  let index=0;
+  const source=String(expression);
+  const skip=()=>{while(/\s/.test(source[index]||''))index++;};
+  const parseExpression=()=>{
+    let value=parseTerm();
+    while(true){
+      skip();
+      const operator=source[index];
+      if(operator!=='+'&&operator!=='-')break;
+      index++;
+      const next=parseTerm();
+      value=operator==='+'?value+next:value-next;
+    }
+    return value;
+  };
+  const parseTerm=()=>{
+    let value=parseUnary();
+    while(true){
+      skip();
+      const operator=source[index];
+      if(operator!=='*'&&operator!=='/')break;
+      index++;
+      const next=parseUnary();
+      value=operator==='*'?value*next:value/next;
+    }
+    return value;
+  };
+  const parseUnary=()=>{
+    skip();
+    if(source[index]==='+'){index++;return parseUnary();}
+    if(source[index]==='-'){index++;return -parseUnary();}
+    return parsePower();
+  };
+  const parsePower=()=>{
+    let value=parsePrimary();
+    skip();
+    if(source[index]==='^'){index++;value=Math.pow(value,parseUnary());}
+    return value;
+  };
+  const parsePrimary=()=>{
+    skip();
+    if(source[index]==='('){
+      index++;
+      const value=parseExpression();
+      skip();
+      if(source[index]!==')')throw new Error('Missing parenthesis');
+      index++;
+      return value;
+    }
+    const match=source.slice(index).match(/^(?:\d+(?:\.\d*)?|\.\d+)(?:E[+\-]?\d+)?/i);
+    if(!match)throw new Error('Expected number');
+    index+=match[0].length;
+    return Number(match[0]);
+  };
+  const result=parseExpression();
+  skip();
+  if(index!==source.length)throw new Error('Unexpected character');
+  return result;
+}
+
+function clearScratchSheet(){
+  if(!Object.keys(scratchCells).length)return;
+  if(!window.confirm('Clear every value and formula from this reconciliation scratch sheet?'))return;
+  scratchCells={};
+  saveSessionState(false);
+  renderScratchGrid();
+  setScratchStatus(currentCloudSessionId?'Blank sheet autosaved with this Bank Rec.':'Blank sheet saved locally.');
+}
+
+function openJournal(){
+  if(!journalEntries.length){ showToast('No journal entries yet'); return; }
+  let html = `<table class="journal-table"><thead><tr><th>Date</th><th>Comment</th><th>Account</th><th>Description</th><th style="text-align:right">Amount</th></tr></thead><tbody>`;
+  journalEntries.forEach(group => {
+    const state=group.recordingState||'pending';
+    const stateLabel=state==='recorded'?'Recorded in GJ':state==='partial'?'Partly recorded':'To record';
+    html += `<tr class="group-row"><td colspan="5"><div class="journal-group-line"><span>${escapeHtml(group.vendor)}</span><span class="journal-state ${state}">${stateLabel}</span></div></td></tr>`;
+    group.entries.forEach(entry => {
+      const accountCell=entry.entryKey
+        ? `<input class="journal-edit ${entry.acct?'':'missing'}" list="journal-account-list" data-entry-key="${escapeHtml(entry.entryKey)}" value="${escapeHtml(entry.acct||'')}" placeholder="GL required" onchange="updateJournalEntryOverride(this.dataset.entryKey,'acct',this.value)">`
+        : escapeHtml(entry.acct||'');
+      const descriptionCell=entry.entryKey
+        ? `<input class="journal-edit desc" data-entry-key="${escapeHtml(entry.entryKey)}" value="${escapeHtml(entry.desc||'')}" placeholder="Description" onchange="updateJournalEntryOverride(this.dataset.entryKey,'desc',this.value)">`
+        : escapeHtml(entry.desc||'');
+      html += `<tr><td>${escapeHtml(entry.date)}</td><td>${escapeHtml(entry.comment)}</td><td>${accountCell}</td><td>${descriptionCell}</td><td style="text-align:right">${entry.amt.toFixed(2)}</td></tr>`;
+    });
+  });
+  const accountOptions=Object.entries(accountCatalog).map(([account,record])=>`<option value="${escapeHtml(account)}">${escapeHtml(record?.description||'')}</option>`).join('');
+  html += `</tbody></table><datalist id="journal-account-list">${accountOptions}</datalist>`;
+  document.getElementById('journal-body').innerHTML = html;
+  document.getElementById('journal-panel').classList.add('open');
+}
+
+function closeJournal(){
+  document.getElementById('journal-panel').classList.remove('open');
+}
+
+function copyJournal(){
+  if(!journalEntries.length){ showToast('No journal entries yet'); return; }
+  let text = 'Recording Status\tDate\tComment\tAccount\tDescription\tAmount\n';
+  journalEntries.forEach(group => {
+    const stateLabel=group.recordingState==='recorded'?'Recorded in GJ':group.recordingState==='partial'?'Partly recorded':'To record';
+    group.entries.forEach(entry => {
+      text += `${stateLabel}\t${entry.date}\t${entry.comment}\t${entry.acct}\t${entry.desc}\t${entry.amt.toFixed(2)}\n`;
+    });
+  });
+  navigator.clipboard.writeText(text).then(() => showToast('Copied'));
+}
+
+function exportCSV(){
+  if(!results.length){ showToast('Run match first'); return; }
+  let csv = 'Tab,Date,Side,Actual Source,Expected Source,Resolution,Label,Reference,Status,Confidence,GL Account,GL Description,Amount,Detail\n';
+  const allPairs = [...expensePairs.map(p=>({...p,tab:'Expenses'})), ...depositPairs.map(p=>({...p,tab:'Deposits'}))];
+  allPairs.forEach(pair => {
+    const actual = actualBookSource(pair).toUpperCase();
+    const expected = expectedBookSource(pair).toUpperCase();
+    const resolution = getPairResolution(pair).toUpperCase();
+    const status = getPairStatus(pair);
+    if(pair.bank){
+      csv += `"${pair.tab}","${formatDate(pair.bank.tx.date)}","Bank","${actual}","${expected}","${resolution}","${pair.bank.label}","${pair.bank.tx.checkNo || ''}","${status}","${pair.bank.confidence}","${pair.bank.glAcct || ''}","${pair.bank.glDesc || ''}","${pair.bank.tx.amount.toFixed(2)}","${(pair.bank.tx.detail || '').replace(/"/g,'""')}"\n`;
+    }
+    if(pair.book){
+      csv += `"${pair.tab}","${formatDate(pair.book.date)}","Book","${actual}","${expected}","${resolution}","${pair.book.label || ''}","${pair.book.checkNo || pair.book.source || ''}","${status}","${pair.book.confidence || ''}","","","${Number(pair.book.amountSigned || 0).toFixed(2)}","${(pair.book.description || pair.book.subsidiary || '').replace(/"/g,'""')}"\n`;
+    }
+  });
+  downloadCSV(csv, 'bank_rec_workspace_' + new Date().toISOString().slice(0,10) + '.csv');
+}
+
+function exportJournalCSV(){
+  if(!journalEntries.length){ showToast('No journal entries yet'); return; }
+  let csv = 'Recording Status,Date,Comment,Account,Description,Amount\n';
+  journalEntries.forEach(group => {
+    const stateLabel=group.recordingState==='recorded'?'Recorded in GJ':group.recordingState==='partial'?'Partly recorded':'To record';
+    group.entries.forEach(entry => {
+      csv += `"${stateLabel}","${entry.date}","${entry.comment}","${entry.acct}","${entry.desc}","${entry.amt.toFixed(2)}"\n`;
+    });
+  });
+  downloadCSV(csv, 'journal_entries_' + new Date().toISOString().slice(0,10) + '.csv');
+}
+
+function downloadCSV(content, filename){
+  const blob = new Blob([content], {type:'text/csv'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+  showToast('Exported');
+}
+
+function showToast(msg){
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.classList.add('show');
+  setTimeout(()=>el.classList.remove('show'),3000);
+}
+
+/* ---------- Demo: fictional sample files ---------- */
+const SAMPLE_FILES = {
+  bank:     ['sample_bank_export.csv', "Date,Transaction Description,Transaction Detail,Amount,Customer Reference\n03/02/2026,REMOTE DEPOSIT,REMOTE DEPOSIT MAINTENANCE BATCH 0301,18420.00,\n03/02/2026,PAID CHECK,CHECK 1041,-1245.00,1041\n03/03/2026,PAID CHECK,CHECK 1042,-860.50,1042\n03/04/2026,ACH DEBIT,CON ED CECONY BILLPAY 8812,-3412.18,\n03/05/2026,PAID CHECK,CHECK 1043,-2300.00,1043\n03/09/2026,ACH DEBIT,NATIONAL GRID NGRID WEB PAY,-1987.40,\n03/10/2026,ACH CREDIT,RENT PORTAL SETTLEMENT 0310,6315.50,\n03/13/2026,ACH DEBIT,ADP WAGE PAY 031326,-8450.00,\n03/13/2026,ACH DEBIT,ADP TAX 031326,-2110.35,\n03/16/2026,ACH DEBIT,NYCWATERBOARD BILLPAY,-1540.00,\n03/16/2026,DEPOSIT,BRANCH DEPOSIT,9880.00,\n03/18/2026,ACH DEBIT,FIRST MORTGAGE BANK LOAN PYMT,-6200.00,\n03/20/2026,CHECKCARD,HOME DEPOT 6141,-312.77,\n03/23/2026,DEPOSIT,LAUNDRY INCOME COLLECTION,410.00,\n03/25/2026,BOOK TRANSFER DEBIT,TRANSFER TO MANAGING AGENT MGMT FEE MARCH,-2750.00,\n03/27/2026,ANALYSIS SERVICE CHARGE,ANALYSIS SERVICE CHARGE FEB,-45.00,\n03/30/2026,BOOK TRANSFER DEBIT,TRANSFER TO RESERVE 7730,-5000.00,\n03/31/2026,INTEREST PAID,INTEREST PAID,12.44,\n"],
+  checks:   ['sample_cash_disbursements.csv', "Date,Check No,Subsidiary,Description,Amount,Source\n02/27/2026,1041,Brightline Elevator Co,Elevator maintenance - March,1245.00,CD-301\n02/28/2026,1042,Northside Plumbing,Boiler room repair - parts,500.00,CD-302\n02/28/2026,1042,Northside Plumbing,Boiler room repair - labor,360.50,CD-302\n03/01/2026,,Con Edison,Electricity - common areas,3412.18,INV-5521\n03/06/2026,,Natl Grid Gas,Heating gas - Feb,1987.40,INV-5530\n03/12/2026,,NYC Water Board,Water / sewer - Q1,1540.00,INV-5544\n03/10/2026,,First Mortgage Bank,Mortgage payment - March,6200.00,INV-5550\n03/24/2026,,Managing Agent,Management fee - March,2750.00,INV-5560\n03/29/2026,1044,Greenway Landscaping,Spring cleanup deposit,1050.00,CD-303\n"],
+  gj:       ['sample_general_journal.csv', "Date,Source,Account,Description,Amount\n03/13/2026,GJ-201,60110,ADP payroll - week ending 3/13,8450.00\n03/13/2026,GJ-201,10010,ADP payroll - week ending 3/13,-8450.00\n03/31/2026,GJ-210,60120,Accrued payroll tax adjustment,325.00\n03/31/2026,GJ-210,21000,Accrued payroll tax adjustment,-325.00\n"],
+  deposits: ['sample_cash_receipts.csv', "Date,Reference,Customer,Description,Amount\n03/01/2026,CR-101,Shareholders - batch,Maintenance receipts batch 1,18420.00\n03/06/2026,CR-102,Rent portal,Online maintenance payments,6315.50\n03/23/2026,CR-103,Laundry vendor,Laundry room income - Q1,410.00\n"],
+  coa:      ['sample_chart_of_accounts.csv', "Account,Description,Abbreviation\n10010,Operating Cash,Operating\n10020,Reserve Cash,Reserve\n21000,Accrued Liabilities,Accrued\n40100,Maintenance Income,Maint Inc\n45000,Other Income,Other Inc\n46200,Interest Income,Interest\n60110,Payroll,Payroll\n60120,Payroll Taxes,Payroll Tax\n60155,Payroll Fees,Payroll Fee\n60310,Mortgage Interest,Mortgage\n60420,Electricity,Electric\n60440,Gas / Heating,Gas\n60460,Water / Sewer,Water\n60750,Management Fee,Mgmt Fee\n63080,Bank Charges,Bank Chg\n63210,Supplies,Supplies\n61000,Repairs & Maintenance,Repairs\n"]
+};
+
+async function loadSampleData(){
+  const property=document.getElementById('cloud-property');
+  const month=document.getElementById('cloud-month');
+  if(property&&[...property.options].some(o=>o.value==='MPL'))property.value='MPL';
+  if(month)month.value='2026-03';
+  bankRecCloudContextChanged();
+  for(const type of ['bank','checks','gj','deposits','coa']){
+    const [name,text]=SAMPLE_FILES[type];
+    await loadFile(type,new File([text],name,{type:'text/csv'}));
+  }
+  const account=document.getElementById('cloud-account-label');
+  if(account&&account.options.length>1){account.selectedIndex=1;bankRecAccountChanged();}
+  const bom=document.getElementById('cloud-bom-balance'), eom=document.getElementById('cloud-eom-balance');
+  if(bom&&!bom.value)bom.value='52000.00';
+  if(eom&&!eom.value){
+    const net=bankData.reduce((sum,row)=>sum+parseAmount(row['Amount']),0);
+    eom.value=(52000+net).toFixed(2);
+  }
+  bankRecBalanceChanged();
+  runMatch();
+  showToast('Sample data loaded - all names and amounts are fictional');
+}
+
+renderWorkspace();
+initBankRecCloud();
+</script>
+</body>
+</html>
+
+
+
+
+

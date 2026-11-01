@@ -1,0 +1,18 @@
+Account,Description,Abbreviation
+10010,Operating Cash,Operating
+10020,Reserve Cash,Reserve
+21000,Accrued Liabilities,Accrued
+40100,Maintenance Income,Maint Inc
+45000,Other Income,Other Inc
+46200,Interest Income,Interest
+60110,Payroll,Payroll
+60120,Payroll Taxes,Payroll Tax
+60155,Payroll Fees,Payroll Fee
+60310,Mortgage Interest,Mortgage
+60420,Electricity,Electric
+60440,Gas / Heating,Gas
+60460,Water / Sewer,Water
+60750,Management Fee,Mgmt Fee
+63080,Bank Charges,Bank Chg
+63210,Supplies,Supplies
+61000,Repairs & Maintenance,Repairs
