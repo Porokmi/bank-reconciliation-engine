@@ -21,6 +21,30 @@ I built this with substantial help from AI, mostly OpenAI Codex, with some help 
 - **Checking:** before relying on it, I compared its results with reconciliations I had done by hand.
 - **This public version:** turning it into a demo (browser-only storage, fictional sample data) and setting up this repository were also done with AI help, including Claude Code.
 
+## What it does
+
+**Import**
+- Upload or drag in CSV, tab-delimited TXT or Excel (.xls/.xlsx) exports for five sources: bank export, general journal, cash disbursements, cash receipts and chart of accounts.
+- Finds the header row automatically, maps the columns (date, amount, vendor, reference, description) and shows a preview of the mapping.
+
+**Workspace**
+- One reconciliation per property, bank account (last 4 digits) and reporting month, with beginning and ending statement balances.
+- Save and reopen named reconciliations with autosave, and *Complete & Clear* when a month is done. In production these are shared across the team in the database; in the demo they stay in your browser.
+- In production, matching rules are stored per property in the database, and property-specific rules take priority over general ones.
+
+**Review**
+- Split view with the bank on the left and the books on the right, separately for expenses/checks and deposits/income.
+- Filters by status (high-confidence match, needs review, missing CD/CR/GJ, book only/outstanding), search by vendor, reference or amount, sorting, and grouping by vendor.
+- For each open item, choose how it's resolved (record it in CD, clear it in CR, or journal it in GJ) and mark it reviewed.
+- Section summaries of bank and book totals, resolved and outstanding items, and the remaining gap, alongside the statement balance control.
+
+**Output**
+- Drafted journal entries, with payroll split into wages, taxes and fees, and editable GL accounts and descriptions. Copy them or export them as CSV.
+- Export the whole workspace (every bank and book line with its status, confidence, resolution and GL account) as CSV.
+
+**Scratch sheet**
+- A small built-in spreadsheet for side calculations: cell references, `SUM` ranges, + − × ÷ and powers, and paste from Excel.
+
 ## How the matching works
 
 Each bank line is routed through a sequence of rules, from most to least certain:
